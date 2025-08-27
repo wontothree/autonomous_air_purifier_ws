@@ -4,6 +4,9 @@
     ├── launch/
     ├── resources
     ├── self_drive_sim
+        └── self_drive_sim
+            └── agent
+                └── agent.py
     ├── test
     └── worlds
         ├── map0.json
@@ -18,3 +21,9 @@
         ├── map3.json
         ├── map3.npz
         └── map3.world
+
+# Dependencies
+
+```bash
+
+```

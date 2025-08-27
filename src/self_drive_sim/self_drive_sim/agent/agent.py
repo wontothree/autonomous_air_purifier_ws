@@ -11,14 +11,14 @@ from rclpy.node import Node
 from std_msgs.msg import String
 from geometry_msgs.msg import PoseWithCovarianceStamped
 from nav_msgs.msg import Odometry                          # Odometry
-import tf_transformations                                  # quaternion -> euler
 from geometry_msgs.msg import Pose as RosPose, PoseArray   # (visualization)
 
 
 # python dependencies
 from dataclasses import dataclass, field
 import math
-import random                                           # random.gauss
+import random                                              # random.gauss
+from scipy.spatial.transform import Rotation as R          # quaternion -> euler
 
 @dataclass
 class Pose:
@@ -93,6 +93,7 @@ class RMCLocalizer:
         self._initial_noise_x = initial_noise_x
         self._initial_noise_y = initial_noise_y
         self._initial_noise_yaw = initial_noise_yaw
+        self.particle_set = []
 
         # pose
         self.rmcl_estimated_pose = Pose()
@@ -102,7 +103,6 @@ class RMCLocalizer:
         xo, yo, yawo = self.rmcl_estimated_pose.x, self.rmcl_estimated_pose.y, self.rmcl_estimated_pose.yaw
         wo = 1.0 / self._particles_num
 
-        self.particle_set = []
         for _ in range(self._particles_num):
             x = xo + random.gauss(0, self._initial_noise_x)
             y = yo + random.gauss(0, self._initial_noise_y)
@@ -150,12 +150,14 @@ class RMCLocalizerROS(Node):
         self.particles_pub = self.create_publisher(PoseArray, 'particle_set', 10)
 
     def timer_callback(self):
-        self.publish_particle_set(self._rmclocalizer.particle_set)
+        if hasattr(self._rmclocalizer, 'particle_set'):
+            self.publish_particle_set(self._rmclocalizer.particle_set)
 
     def callback_initialpose(self, msg: PoseWithCovarianceStamped):
         # extract yaw from quaternion
         q = msg.pose.pose.orientation
-        _, _, yaw = tf_transformations.euler_from_quaternion([q.x, q.y, q.z, q.w])
+        r = R.from_quat([q.x, q.y, q.z, q.w])
+        _, _, yaw = r.as_euler('xyz')  # roll, pitch, yaw (radians)
 
         # set initial pose of robot (used for initialize particle set)
         self._rmclocalizer.rmcl_estimated_pose.set_pose(
@@ -233,15 +235,14 @@ class RMCLocalizerROS(Node):
 
     def publish_particle_set(self, particle_set):
         """
-        입력으로 받은 입자 집합을 PoseArray로 발행하여 RViz에서 시각화
-        @param particle_set: List[Particle], 입자 객체 리스트
+        Publish particle set as PoseArray for RViz visualization
         """
         if not particle_set:
-            return  # 빈 리스트면 발행하지 않음
+            return
 
         pose_array_msg = PoseArray()
         pose_array_msg.header.stamp = self.get_clock().now().to_msg()
-        pose_array_msg.header.frame_id = 'odom'  # RViz global frame
+        pose_array_msg.header.frame_id = 'odom'
 
         for particle in particle_set:
             pose_msg = RosPose()
@@ -249,8 +250,9 @@ class RMCLocalizerROS(Node):
             pose_msg.position.y = particle.pose.y
             pose_msg.position.z = 0.0
 
-            # yaw → quaternion
-            q = tf_transformations.quaternion_from_euler(0, 0, particle.pose.yaw)
+            # convert yaw to quaternion
+            r = R.from_euler('xyz', [0, 0, particle.pose.yaw])
+            q = r.as_quat()  # [x, y, z, w]
             pose_msg.orientation.x = q[0]
             pose_msg.orientation.y = q[1]
             pose_msg.orientation.z = q[2]
