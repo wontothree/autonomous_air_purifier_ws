@@ -1,108 +1,356 @@
 from self_drive_sim.agent.interfaces import Observation, Info, MapInfo
 
-class Agent:
-    def __init__(self, logger):
-        self.logger = logger
-        self.steps = 0
+# print global map
+import numpy as np
+import os
+from self_drive_sim.simulation.floor_map import FloorMap
 
-    def initialize_map(self, map_info: MapInfo):
-        """
-        매핑 정보를 전달받는 함수
-        시뮬레이션 (episode) 시작 시점에 호출됨
+# ROS dependencies
+import rclpy
+from rclpy.node import Node
+from std_msgs.msg import String
+from geometry_msgs.msg import PoseWithCovarianceStamped
+from nav_msgs.msg import Odometry                          # Odometry
+import tf_transformations                                  # quaternion -> euler
+from geometry_msgs.msg import Pose as RosPose, PoseArray   # (visualization)
 
-        MapInfo: 매핑 정보를 저장한 클래스
-        ---
-        height: int, 맵의 높이 (격자 크기 단위)
-        width: int, 맵의 너비 (격자 크기 단위)
-        wall_grid: np.ndarray, 각 칸이 벽인지 여부를 저장하는 2차원 배열
-        room_grid: np.ndarray, 각 칸이 몇 번 방에 해당하는지 저장하는 2차원 배열
-        num_rooms: int, 방의 개수
-        grid_size: float, 격자 크기 (m)
-        grid_origin: (float, float), 실제 world의 origin이 wall_grid 격자의 어디에 해당하는지 표시
-        station_pos: (float, float), 청정 완료 후 복귀해야 하는 도크의 world 좌표
-        room_names: list of str, 각 방의 이름
-        pollution_end_time: float, 마지막 오염원 활동이 끝나는 시각
-        starting_pos: (float, float), 시뮬레이션 시작 시 로봇의 world 좌표
-        starting_angle: float, 시뮬레이션 시작 시 로봇의 각도 (x축 기준, 반시계 방향)
 
-        is_wall: (x, y) -> bool, 해당 좌표가 벽인지 여부를 반환하는 함수
-        get_room_id: (x, y) -> int, 해당 좌표가 속한 방의 ID를 반환하는 함수 (방에 속하지 않으면 -1 반환)
-        get_cells_in_room: (room_id) -> list of (x, y), 해당 방에 속한 모든 격자의 좌표를 반환하는 함수
-        grid2pos: (grid) -> (x, y), 격자 좌표를 실제 world 좌표로 변환하는 함수
-        pos2grid: (pos) -> (grid_x, grid_y), 실제 world 좌표를 격자 좌표로 변환하는 함수
-        ---
-        """
+# python dependencies
+from dataclasses import dataclass, field
+import math
+import random                                           # random.gauss
+
+@dataclass
+class Pose:
+    x: float = 0.0
+    y: float = 0.0
+    _yaw: float = 0.0
+
+    def __post_init__(self):
+        self._normalize_yaw()
+
+    def _normalize_yaw(self):
+        """Yaw를 -pi ~ pi 범위로 정규화"""
+        while self._yaw < -math.pi:
+            self._yaw += 2.0 * math.pi
+        while self._yaw > math.pi:
+            self._yaw -= 2.0 * math.pi
+
+    @property
+    def yaw(self):
+        return self._yaw
+
+    @yaw.setter
+    def yaw(self, value):
+        self._yaw = value
+        self._normalize_yaw()
+
+    def set_pose(self, x: float, y: float, yaw: float):
+        self.x = x
+        self.y = y
+        self.yaw = yaw
+
+@dataclass
+class Particle:
+    pose: Pose = field(default_factory=Pose)
+    weight: float = 0.0
+
+    @property
+    def x(self):
+        return self.pose.x
+
+    @x.setter
+    def x(self, value):
+        self.pose.x = value
+
+    @property
+    def y(self):
+        return self.pose.y
+
+    @y.setter
+    def y(self, value):
+        self.pose.y = value
+
+    @property
+    def yaw(self):
+        return self.pose.yaw
+
+    @yaw.setter
+    def yaw(self, value):
+        self.pose.yaw = value
+
+# ----------------------------------------------------------------------------------------------------
+
+class RMCLocalizer:
+    def __init__(self, particles_num=100,
+                 initial_noise_x=0.02,
+                 initial_noise_y=0.02,
+                 initial_noise_yaw=0.02
+                 ):
+        
+        # particle
+        self._particles_num = particles_num
+        self._initial_noise_x = initial_noise_x
+        self._initial_noise_y = initial_noise_y
+        self._initial_noise_yaw = initial_noise_yaw
+
+        # pose
+        self.rmcl_estimated_pose = Pose()
+
+    def initialize_particle_set(self):
+        """입자를 초기 포즈 주변에 무작위로 분포시키고 가중치를 균등하게 설정"""
+        xo, yo, yawo = self.rmcl_estimated_pose.x, self.rmcl_estimated_pose.y, self.rmcl_estimated_pose.yaw
+        wo = 1.0 / self._particles_num
+
+        self.particle_set = []
+        for _ in range(self._particles_num):
+            x = xo + random.gauss(0, self._initial_noise_x)
+            y = yo + random.gauss(0, self._initial_noise_y)
+            yaw = yawo + random.gauss(0, self._initial_noise_yaw)
+
+            # set pose and weight
+            particle = Particle(Pose(x, y, yaw), wo)
+            self.particle_set.append(particle)
+
+    def initialize_reliability_set(self):
+        """입자별 신뢰도 배열을 초기값 0.5로 초기화"""
+        self.reliability_set = [0.5] * self._particles_num
+    
+    def update_pose_and_reliability_set(self):
         pass
 
-    def act(self, observation: Observation):
+# ----------------------------------------------------------------------------------------------------
+
+class RMCLocalizerROS(Node):
+    def __init__(self, rmclocalizer):
+        super().__init__('rmc_localizer_node') # node name
+
+        # MCLocalizer 객체
+        self._rmclocalizer = rmclocalizer
+        self._is_initialized = False
+
+        # timer
+        self.publisher_ = self.create_publisher(String, 'topic', 10)
+        self.i = 0
+        timer_period = 0.5
+        self.timer = self.create_timer(timer_period, self.timer_callback)
+
+        # callback odom
+        self._prev_time = 0.0
+
+        # subscribers
+        self.sub_initial_pose = self.create_subscription(
+            PoseWithCovarianceStamped,
+            '/initialpose',
+            self.callback_initialpose,
+            10
+        )
+
+        # publishers
+        self.particles_pub = self.create_publisher(PoseArray, 'particle_set', 10)
+
+    def timer_callback(self):
+        self.publish_particle_set(self._rmclocalizer.particle_set)
+
+    def callback_initialpose(self, msg: PoseWithCovarianceStamped):
+        # extract yaw from quaternion
+        q = msg.pose.pose.orientation
+        _, _, yaw = tf_transformations.euler_from_quaternion([q.x, q.y, q.z, q.w])
+
+        # set initial pose of robot (used for initialize particle set)
+        self._rmclocalizer.rmcl_estimated_pose.set_pose(
+            x=msg.pose.pose.position.x,
+            y=msg.pose.pose.position.y,
+            yaw=yaw
+        )
+
+        # initialize particle set
+        self._rmclocalizer.initialize_particle_set()
+
+        # initialize reliability set if needed
+        if True:
+            self._rmclocalizer.initialize_reliability_set()
+
+        # mark as initialized
+        self._is_initialized = True
+
+    # def odom_callback(self, msg: Odometry):
+    #     """
+    #     Odometry 메시지로부터 델타 이동량과 yaw를 업데이트
+
+    #     @param msg: nav_msgs/Odometry 메시지
+    #     @details
+    #     업데이트되는 멤버 변수:
+    #     - self._prev_time : 이전 Odometry 메시지 수신 시각(초 단위)
+    #     - self.delta_x : x 방향 이동량 누적
+    #     - self.delta_y : y 방향 이동량 누적
+    #     - self.delta_dist : 전방 이동거리 누적
+    #     - self.delta_yaw : 회전각 누적, -pi ~ pi 범위로 정규화
+    #     - self.delta_time_sum : 누적 시간
+    #     - self.odom_pose_stamp : 최근 Odometry 메시지의 timestamp
+    #     - self.odom_pose : Odometry로부터 추정한 로봇 포즈(Pose)
+    #     """
+    #     curr_time = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+
+    #     if not self.is_initialized:
+    #         self._prev_time = curr_time
+    #         self.is_initialized = True
+    #         return
+
+    #     delta_time = curr_time - self._prev_time
+    #     if delta_time == 0.0:
+    #         return
+
+    #     # extract data from Odometry message
+    #     self.odom_pose_stamp = msg.header.stamp
+    #     self.delta_x += msg.twist.twist.linear.x * delta_time
+    #     self.delta_y += msg.twist.twist.linear.y * delta_time
+    #     self.delta_dist += msg.twist.twist.linear.x * delta_time
+    #     self.delta_yaw += msg.twist.twist.angular.z * delta_time
+
+    #     # normalize yaw
+    #     while self.delta_yaw < -math.pi:
+    #         self.delta_yaw += 2.0 * math.pi
+    #     while self.delta_yaw > math.pi:
+    #         self.delta_yaw -= 2.0 * math.pi
+
+    #     # .
+    #     self.delta_time_sum += delta_time
+
+    #     # extract yaw from quaternion
+    #     q = msg.pose.pose.orientation
+    #     quaternion = [q.x, q.y, q.z, q.w]
+    #     _, _, yaw = tf_transformations.euler_from_quaternion(quaternion)
+
+    #     # update odom pose
+    #     self.odom_pose.set_pose(
+    #         msg.pose.pose.position.x,
+    #         msg.pose.pose.position.y,
+    #         yaw
+    #     )
+
+    #     self._prev_time = curr_time
+
+    def publish_particle_set(self, particle_set):
         """
-        env로부터 Observation을 전달받아 action을 반환하는 함수
-        매 step마다 호출됨
-
-        Observation: 로봇이 센서로 감지하는 정보를 저장한 dict
-        ---
-        sensor_lidar_front: np.ndarray, 전방 라이다 (241 x 1)
-        sensor_lidar_back: np.ndarray, 후방 라이다 (241 x 1)
-        sensor_tof_left: np.ndarray, 좌측 multi-tof (8 x 8)
-        sensor_tof_right: np.ndarray, 우측 multi-tof (8 x 8)
-        sensor_camera: np.ndarray, 전방 카메라 (480 x 640 x 3)
-        sensor_ray: float, 상향 1D 라이다
-        sensor_pollution: float, 로봇 내장 오염도 센서
-        air_sensor_pollution: np.ndarray, 거치형 오염도 센서 (방 개수 x 1)
-        disp_position: (float, float), 이번 step의 로봇의 위치 변위 (오차 포함)
-        disp_angle: float, 이번 step의 로봇의 각도 변위 (오차 포함)
-        ---
-
-        action: (MODE, LINEAR, ANGULAR)
-        MODE가 0인 경우: 이동 명령, Twist 컨트롤로 선속도(LINEAR) 및 각속도(ANGULAR) 조절. 최대값 1m/s, 2rad/s
-        MODE가 1인 경우: 청정 명령, 제자리에서 공기를 청정. LINEAR, ANGULAR는 무시됨. 청정 명령을 유지한 후 1초가 지나야 실제로 청정이 시작됨
+        입력으로 받은 입자 집합을 PoseArray로 발행하여 RViz에서 시각화
+        @param particle_set: List[Particle], 입자 객체 리스트
         """
-        action = (0, 0.5, 1.0)
+        if not particle_set:
+            return  # 빈 리스트면 발행하지 않음
 
-        # log 사용법 예시: print를 사용하면 비정상적으로 출력되므로 log를 사용
-        if self.steps % 50 == 0:
-            self.log(observation['sensor_tof_left'])
+        pose_array_msg = PoseArray()
+        pose_array_msg.header.stamp = self.get_clock().now().to_msg()
+        pose_array_msg.header.frame_id = 'odom'  # RViz global frame
 
-        self.steps += 1
+        for particle in particle_set:
+            pose_msg = RosPose()
+            pose_msg.position.x = particle.pose.x
+            pose_msg.position.y = particle.pose.y
+            pose_msg.position.z = 0.0
 
-        return action
+            # yaw → quaternion
+            q = tf_transformations.quaternion_from_euler(0, 0, particle.pose.yaw)
+            pose_msg.orientation.x = q[0]
+            pose_msg.orientation.y = q[1]
+            pose_msg.orientation.z = q[2]
+            pose_msg.orientation.w = q[3]
 
-    def learn(
-            self,
-            observation: Observation,
-            info: Info,
-            action,
-            next_observation: Observation,
-            next_info: Info,
-            terminated,
-            done,
-            ):
-        """
-        실시간으로 훈련 상태를 전달받고 에이전트를 학습시키는 함수
-        training 중에만 매 step마다 호출되며(act 호출 후), test 중에는 호출되지 않음
-        강한 충돌(0.7m/s 이상 속도로 충돌)이 발생하면 시뮬레이션이 종료되고 terminated에 true가 전달됨 (실격)
-        도킹 스테이션에 도착하면 시뮬레이션이 종료되고 done에 true가 전달됨
+            pose_array_msg.poses.append(pose_msg)
 
-        Info: 센서 감지 정보 이외에 학습에 활용할 수 있는 정보 - 오직 training시에만 제공됨
-        ---
-        robot_position: (float, float), 로봇의 현재 world 좌표
-        robot_angle: float, 로봇의 현재 각도
-        collided: bool, 현재 로봇이 벽이나 물체에 충돌했는지 여부
-        all_pollution: np.ndarray, 거치형 에어 센서가 없는 방까지 포함한 오염도 정보
-        ---
-        """
-        pass
+        self.particles_pub.publish(pose_array_msg)
 
-    def reset(self):
-        """
-        모델 상태 등을 초기화하는 함수
-        training시, 각 episode가 끝날 때마다 호출됨 (initialize_map 호출 전)
-        """
-        self.steps = 0
 
-    def log(self, msg):
-        """
-        터미널에 로깅하는 함수. print를 사용하면 비정상적으로 출력됨.
-        ROS Node의 logger를 호출.
-        """
-        self.logger(str(msg))
+# ----------------------------------------------------------------------------------------------------
+
+def print_global_map(map_path, step=5):
+    """
+    주어진 FloorMap 파일을 읽고, 터미널용 맵을 출력합니다.
+    - 벽: '#'
+    - 빈 공간: '.'
+    - 방 ID: 0-9, 10-15 -> A-F (16진수)
+    - 스테이션: 'S'
+    - 좌표계: 상단(y), 좌측(x) 5단위 표시
+
+    using method ---
+
+    map_file = './../../worlds/map2.npz'
+    print_global_map(map_file, step=5)
+
+    """
+    # 1. FloorMap 생성
+    if not os.path.exists(map_path):
+        raise FileNotFoundError(f"Map file not found: {map_path}")
+    floor_map = FloorMap.from_file(map_path)
+
+    # 2. MapInfo 생성
+    pollution_end_time = 10.0
+    starting_pos = floor_map.station_pos
+    starting_angle = 0.0
+    map_info = floor_map.to_map_info(pollution_end_time, starting_pos, starting_angle)
+
+    wall_grid = map_info.wall_grid
+    station_pos = map_info.station_pos
+
+    height, width = wall_grid.shape
+    grid_display = np.full((height, width), '.', dtype=str)  # 빈 공간은 '.'
+
+    # 벽 표시
+    grid_display[wall_grid] = '#'
+
+    # 방 ID 표시 (0-9, 10-15 -> A-F)
+    def room_id_to_char(room_id):
+        if room_id < 10:
+            return str(room_id)
+        else:
+            return chr(ord('A') + (room_id - 10) % 6)  # 10->A, 11->B ... 15->F, 16->A 반복
+
+    for room_id in range(map_info.num_rooms):
+        cells = map_info.get_cells_in_room(room_id)
+        char = room_id_to_char(room_id)
+        for x, y in cells:
+            # 벽이나 스테이션이 아니면 덮어쓰기
+            if grid_display[x, y] not in ('#', 'S'):
+                grid_display[x, y] = char
+
+    # 스테이션 표시
+    gx, gy = map_info.pos2grid(station_pos)
+    row = int(gx)
+    col = int(gy)
+    if 0 <= row < height and 0 <= col < width:
+        grid_display[row, col] = 'S'
+
+    # -----------------------------
+    # 좌표계와 함께 출력
+    # 상단 y좌표 (열)
+    y_labels = '   '
+    for j in range(0, width, step):
+        label = f"{j:<{step}}"
+        y_labels += label
+    print(y_labels)
+
+    # 각 행 출력 (왼쪽 x좌표)
+    for i in range(height):
+        x_label = f"{i:<2d}" if i % step == 0 else "  "
+        line = x_label + ' ' + ''.join(grid_display[i, :])
+        print(line)
+
+# ----------------------------------------------------------------------------------------------------
+
+def main(args=None):
+    rclpy.init(args=args)
+
+    # 
+    _rmclocalizer = RMCLocalizer()
+    node = RMCLocalizerROS(_rmclocalizer)
+
+    rclpy.spin(node)
+    node.destroy_node()
+    rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    # map_file = './../../worlds/map3.npz'
+    # print_global_map(map_file, step=5)
+
+    main()
