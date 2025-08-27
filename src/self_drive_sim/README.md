@@ -22,8 +22,14 @@
         ├── map3.npz
         └── map3.world
 
-# Dependencies
+# Quick Start
+
+## Teleoperation
 
 ```bash
+# dependencies
+apt-get update
+apt-get install -y ros-humble-teleop-twist-keyboard
 
+ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args --remap cmd_vel:=/robot_0/cmd_vel
 ```
