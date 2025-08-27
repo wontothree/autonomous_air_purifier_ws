@@ -1,0 +1,70 @@
+# version: '3.8'
+
+# services:
+#   autonomous_navigation:
+#     build:
+#       context: .
+#       dockerfile: Dockerfile
+#     platform: linux/amd64 # M1 Mac에서는 Rosetta 2로 x86 이미지 실행
+#     container_name: autonomous_navigation_devcontainer
+#     tty: true
+#     stdin_open: true
+#     volumes:
+#       - ..:/root/autonomous_navigation_ws
+#     environment:
+#       - ROS_DOMAIN_ID=0
+#       - DISPLAY=novnc:0.0   # RViz2 화면을 novnc 컨테이너로 출력
+#     networks:
+#       - x11
+
+#   novnc:
+#     image: theasp/novnc:latest
+#     container_name: autonomous_navigation_novnc
+#     environment:
+#       - DISPLAY_WIDTH=1728
+#       - DISPLAY_HEIGHT=972
+#     ports:
+#       - "8080:8080"   # 브라우저 접속 포트
+#     networks:
+#       - x11
+
+# networks:
+#   x11:
+
+version: '3.8'
+
+services:
+  autonomous_navigation:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    platform: linux/amd64
+    container_name: autonomous_navigation_devcontainer
+    tty: true
+    stdin_open: true
+    ipc: host # 추가: Gazebo의 프로세스 간 통신 안정성을 위해 필요할 수 있습니다.
+    volumes:
+      - ..:/root/autonomous_navigation_ws
+    environment:
+      - ROS_DOMAIN_ID=0
+      - DISPLAY=novnc:0.0 # 이 설정은 올바릅니다.
+      # --- 아래 3줄을 추가합니다 ---
+      - QT_X11_NO_MITSHM=1       # Qt 기반 GUI(Gazebo, RViz) 안정성을 위한 설정
+      - LIBGL_ALWAYS_SOFTWARE=1  # VNC 환경에서 Gazebo의 그래픽 렌더링을 강제로 소프트웨어 방식으로 설정
+      - ALSOFT_DRIVERS=null      # 오디오 관련 오류를 방지
+    networks:
+      - x11
+
+  novnc:
+    image: theasp/novnc:latest
+    container_name: autonomous_navigation_novnc
+    environment:
+      - DISPLAY_WIDTH=1728
+      - DISPLAY_HEIGHT=972
+    ports:
+      - "8080:8080"
+    networks:
+      - x11
+
+networks:
+  x11:
