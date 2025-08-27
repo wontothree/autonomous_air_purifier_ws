@@ -27,8 +27,6 @@
 
 # 🚀 Quick Start
 
-I need to install the following with devcontainer.
-
 ```bash
 # dependencies
 apt update

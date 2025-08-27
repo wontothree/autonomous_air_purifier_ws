@@ -45,7 +45,7 @@ class Pose:
         self._yaw = value
         self._normalize_yaw()
 
-    def set_pose(self, x: float, y: float, yaw: float):
+    def update(self, x: float, y: float, yaw: float):
         self.x = x
         self.y = y
         self.yaw = yaw
@@ -94,9 +94,19 @@ class RMCLocalizer:
         self._initial_noise_y = initial_noise_y
         self._initial_noise_yaw = initial_noise_yaw
         self.particle_set = []
+        self.reliability_set = []
 
         # pose
         self.rmcl_estimated_pose = Pose()
+        self.odom_pose = Pose()
+
+        # motion
+        # obtained by odom and used by updatae_pose_by_motion_model
+        self.delta_x = self.delta_y = self.delta_dist = self.delta_yaw = 0
+        self.total_abs_delta_x = self.total_abs_delta_y = self.total_abs_delta_dist = self.total_abs_delta_yaw = 0
+        self.delta_time_sum = 0
+        self.odom_onise = [1.0, 0.5, 0.5, 1.0]
+        self.reliability_transition_coef = [0.0, 0.0]
 
     def initialize_particle_set(self):
         """입자를 초기 포즈 주변에 무작위로 분포시키고 가중치를 균등하게 설정"""
@@ -115,9 +125,91 @@ class RMCLocalizer:
     def initialize_reliability_set(self):
         """입자별 신뢰도 배열을 초기값 0.5로 초기화"""
         self.reliability_set = [0.5] * self._particles_num
-    
-    def update_pose_and_reliability_set(self):
-        pass
+        
+    def update_pose_by_motion_model(self):
+        """
+        @brief Odometry 기반 motion model을 이용해 파티클 집합을 업데이트
+
+        이 함수는 differential drive 모델 또는 omni-directional 모델을 기반으로
+        odometry 델타를 사용하여 추정 위치(self.rmcl_estimated_pose)와 파티클 집합(self.particle_set)을
+        업데이트한다. 또한 파티클 신뢰도(self.reliability_set)를 감소시킨다.
+
+        @details
+        - 각 파티클은 Gaussian 노이즈가 추가된 이동량/회전량으로 업데이트됨
+        - 신뢰도(reliability)는 이동량/회전량의 제곱에 비례하여 감소함
+
+        @attention 함수 실행 후 delta_x, delta_y, delta_dist, delta_yaw는 0으로 초기화된다.
+
+        @par 변경되는 멤버 변수
+        - self.delta_x, self.delta_y, self.delta_dist, self.delta_yaw : 0.0으로 초기화
+        - self.total_abs_delta_x, self.total_abs_delta_y, self.total_abs_delta_dist, self.total_abs_delta_yaw : 절댓값 누적
+        - self.rmcl_estimated_pose : 로봇의 추정 위치/자세(x, y, yaw) 업데이트
+        - self.particle_set : 각 파티클의 위치/자세 업데이트
+        - self.reliability_set : 각 파티클 신뢰도 갱신
+
+        @par 사용하는 멤버 변수 (읽기 전용)
+        - self.use_omni_directional_model : motion model 종류 선택
+        - self.odom_noise_ddm : differential drive 모델 노이즈 파라미터
+        - self.odom_noise_odm : omni-directional 모델 노이즈 파라미터
+        - self.rel_trans_ddm : differential drive 모델 신뢰도 감소 파라미터
+        - self.rel_trans_odm : omni-directional 모델 신뢰도 감소 파라미터
+        - self.estimate_reliability : 신뢰도 갱신 여부
+        - self.particle_set : 파티클 리스트 (참조하여 업데이트 수행)
+        """
+
+        # backup delta values
+        delta_x = self.delta_x
+        delta_y = self.delta_y
+        delta_dist = self.delta_dist
+        delta_yaw = self.delta_yaw
+        # initialize member variables for delta value
+        self.delta_x = self.delta_y = self.delta_dist = self.delta_yaw = 0.0
+
+        # update member variables for delta sum value
+        self.total_abs_delta_x += abs(delta_x)
+        self.total_abs_delta_y += abs(delta_y)
+        self.total_abs_delta_dist += abs(delta_dist)
+        self.total_abs_delta_yaw += abs(delta_yaw)
+
+        # ----------------------------
+        # Differential drive model
+        # ----------------------------
+        
+        # update estimating robot pose
+        yaw = self.rmcl_estimated_pose.yaw
+        t = yaw + delta_yaw / 2.0
+        x = self.rmcl_estimated_pose.x + delta_dist * math.cos(t)
+        y = self.rmcl_estimated_pose.y + delta_dist * math.sin(t)
+        yaw += delta_yaw
+        self.rmcl_estimated_pose.update(x, y, yaw)
+
+            # noisy dist and yaw
+        dist2 = delta_dist * delta_dist
+        yaw2 = delta_yaw * delta_yaw
+        dist_rand_val = dist2 * self.odom_noise[0] + yaw2 * self.odom_noise[1]
+        yaw_rand_val = dist2 * self.odom_noise[2] + yaw2 * self.odom_noise[3]
+
+        for index, particle in enumerate(self.particle_set):
+                # differential drive model
+            ddist = delta_dist + random.gauss(0, math.sqrt(dist_rand_val))
+            dyaw = delta_yaw + random.gauss(0, math.sqrt(yaw_rand_val))
+
+            yaw = particle.pose.yaw
+            t = yaw + dyaw / 2.0
+            x = particle.pose.x + ddist * math.cos(t)
+            y = particle.pose.y + ddist * math.sin(t)
+            yaw += dyaw
+            
+            # update particle set
+            particle.pose.update(x, y, yaw)
+
+            # heuristic as reliability transition model
+            decay_rate = 1.0 - (self.reliability_transition_coef[0] * ddist**2 + self.reliability_transition_coef[1] * dyaw**2)
+            if decay_rate <= 0.0:
+                decay_rate = 1.0e-6
+                
+            # update reliability set
+            self.reliability_set[index] *= decay_rate
 
 # ----------------------------------------------------------------------------------------------------
 
@@ -160,7 +252,7 @@ class RMCLocalizerROS(Node):
         _, _, yaw = r.as_euler('xyz')  # roll, pitch, yaw (radians)
 
         # set initial pose of robot (used for initialize particle set)
-        self._rmclocalizer.rmcl_estimated_pose.set_pose(
+        self._rmclocalizer.rmcl_estimated_pose.update(
             x=msg.pose.pose.position.x,
             y=msg.pose.pose.position.y,
             yaw=yaw
@@ -176,62 +268,63 @@ class RMCLocalizerROS(Node):
         # mark as initialized
         self._is_initialized = True
 
-    # def odom_callback(self, msg: Odometry):
-    #     """
-    #     Odometry 메시지로부터 델타 이동량과 yaw를 업데이트
+    def odom_callback(self, msg: Odometry):
+        """
+        Odometry 메시지로부터 델타 이동량과 yaw를 업데이트
 
-    #     @param msg: nav_msgs/Odometry 메시지
-    #     @details
-    #     업데이트되는 멤버 변수:
-    #     - self._prev_time : 이전 Odometry 메시지 수신 시각(초 단위)
-    #     - self.delta_x : x 방향 이동량 누적
-    #     - self.delta_y : y 방향 이동량 누적
-    #     - self.delta_dist : 전방 이동거리 누적
-    #     - self.delta_yaw : 회전각 누적, -pi ~ pi 범위로 정규화
-    #     - self.delta_time_sum : 누적 시간
-    #     - self.odom_pose_stamp : 최근 Odometry 메시지의 timestamp
-    #     - self.odom_pose : Odometry로부터 추정한 로봇 포즈(Pose)
-    #     """
-    #     curr_time = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        @param msg: nav_msgs/Odometry 메시지
+        @details
+        업데이트되는 멤버 변수:
+        - self.delta_x : x 방향 이동량 누적
+        - self.delta_y : y 방향 이동량 누적
+        - self.delta_dist : 전방 이동거리 누적
+        - self.delta_yaw : 회전각 누적, -pi ~ pi 범위로 정규화
+        - self.delta_time_sum : 누적 시간
+        - self.odom_pose : Odometry로부터 추정한 로봇 포즈(Pose)
 
-    #     if not self.is_initialized:
-    #         self._prev_time = curr_time
-    #         self.is_initialized = True
-    #         return
+        - self._prev_time : 이전 Odometry 메시지 수신 시각(초 단위)
+        - self.odom_pose_stamp : 최근 Odometry 메시지의 timestamp
+        """
+        curr_time = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
 
-    #     delta_time = curr_time - self._prev_time
-    #     if delta_time == 0.0:
-    #         return
+        if not self.is_initialized:
+            self._prev_time = curr_time
+            self.is_initialized = True
+            return
 
-    #     # extract data from Odometry message
-    #     self.odom_pose_stamp = msg.header.stamp
-    #     self.delta_x += msg.twist.twist.linear.x * delta_time
-    #     self.delta_y += msg.twist.twist.linear.y * delta_time
-    #     self.delta_dist += msg.twist.twist.linear.x * delta_time
-    #     self.delta_yaw += msg.twist.twist.angular.z * delta_time
+        delta_time = curr_time - self._prev_time
+        if delta_time == 0.0:
+            return
 
-    #     # normalize yaw
-    #     while self.delta_yaw < -math.pi:
-    #         self.delta_yaw += 2.0 * math.pi
-    #     while self.delta_yaw > math.pi:
-    #         self.delta_yaw -= 2.0 * math.pi
+        # extract data from Odometry message
+        self.odom_pose_stamp = msg.header.stamp
+        self.delta_x += msg.twist.twist.linear.x * delta_time
+        self.delta_y += msg.twist.twist.linear.y * delta_time
+        self.delta_dist += msg.twist.twist.linear.x * delta_time
+        self.delta_yaw += msg.twist.twist.angular.z * delta_time
 
-    #     # .
-    #     self.delta_time_sum += delta_time
+        # normalize yaw
+        while self.delta_yaw < -math.pi:
+            self.delta_yaw += 2.0 * math.pi
+        while self.delta_yaw > math.pi:
+            self.delta_yaw -= 2.0 * math.pi
 
-    #     # extract yaw from quaternion
-    #     q = msg.pose.pose.orientation
-    #     quaternion = [q.x, q.y, q.z, q.w]
-    #     _, _, yaw = tf_transformations.euler_from_quaternion(quaternion)
+        # .
+        self.delta_time_sum += delta_time
 
-    #     # update odom pose
-    #     self.odom_pose.set_pose(
-    #         msg.pose.pose.position.x,
-    #         msg.pose.pose.position.y,
-    #         yaw
-    #     )
+        # extract yaw from quaternion
+        q = msg.pose.pose.orientation
+        r = R.from_quat([q.x, q.y, q.z, q.w])
+        _, _, yaw = r.as_euler('xyz')  # roll, pitch, yaw (radians)
 
-    #     self._prev_time = curr_time
+        # update odom pose
+        self.odom_pose.update(
+            msg.pose.pose.position.x,
+            msg.pose.pose.position.y,
+            yaw
+        )
+
+        self._prev_time = curr_time
 
     def publish_particle_set(self, particle_set):
         """
