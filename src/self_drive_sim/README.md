@@ -56,6 +56,15 @@ source /opt/ros/humble/setup.bash
 source install/setup.bash
 ```
 
+```bash
+ros2 launch self_drive_sim train_launch_map0.py
+ros2 launch self_drive_sim train_launch_map1.py
+ros2 launch self_drive_sim train_launch_map2.py
+ros2 launch self_drive_sim train_launch_map3.py
+```
+
+[http://localhost:8080/vnc.html](http://localhost:8080/vnc.html)
+
 ## Teleoperation
 
 ```bash

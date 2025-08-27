@@ -20,6 +20,16 @@ import math
 import random                                              # random.gauss
 from scipy.spatial.transform import Rotation as R          # quaternion -> euler
 
+def nrand(n: float) -> float:
+    """
+    C++ nrand()와 동일하게 동작하는 Box-Muller 방식의 Gaussian 난수 생성기
+    입력 n은 표준편차 σ
+    """
+    u1 = random.random()  # 0~1 uniform
+    u2 = random.random()  # 0~1 uniform
+    z0 = math.sqrt(-2.0 * math.log(u1)) * math.cos(2.0 * math.pi * u2)
+    return n * z0
+
 @dataclass
 class Pose:
     x: float = 0.0
@@ -105,7 +115,7 @@ class RMCLocalizer:
         self.delta_x = self.delta_y = self.delta_dist = self.delta_yaw = 0
         self.total_abs_delta_x = self.total_abs_delta_y = self.total_abs_delta_dist = self.total_abs_delta_yaw = 0
         self.delta_time_sum = 0
-        self.odom_onise = [1.0, 0.5, 0.5, 1.0]
+        self.odom_noise = [1.0, 0.5, 0.5, 1.0]
         self.reliability_transition_coef = [0.0, 0.0]
 
     def initialize_particle_set(self):
@@ -183,33 +193,94 @@ class RMCLocalizer:
         yaw += delta_yaw
         self.rmcl_estimated_pose.update(x, y, yaw)
 
-            # noisy dist and yaw
+        # noisy dist and yaw
         dist2 = delta_dist * delta_dist
         yaw2 = delta_yaw * delta_yaw
         dist_rand_val = dist2 * self.odom_noise[0] + yaw2 * self.odom_noise[1]
         yaw_rand_val = dist2 * self.odom_noise[2] + yaw2 * self.odom_noise[3]
 
+        # for index, particle in enumerate(self.particle_set):
+        #     # differential drive model
+        #     ddist = delta_dist + random.gauss(0, math.sqrt(dist_rand_val))
+        #     dyaw = delta_yaw + random.gauss(0, math.sqrt(yaw_rand_val))
+
+        #     yaw = particle.pose.yaw
+        #     t = yaw + dyaw / 2.0
+        #     x = particle.pose.x + ddist * math.cos(t)
+        #     y = particle.pose.y + ddist * math.sin(t)
+        #     yaw += dyaw
+            
+        #     # update particle set
+        #     particle.pose.update(x, y, yaw)
+
+        #     # heuristic as reliability transition model
+        #     decay_rate = 1.0 - (self.reliability_transition_coef[0] * ddist**2 + self.reliability_transition_coef[1] * dyaw**2)
+        #     if decay_rate <= 0.0:
+        #         decay_rate = 1.0e-6
+                
+        #     # update reliability set
+        #     self.reliability_set[index] *= decay_rate
+
         for index, particle in enumerate(self.particle_set):
-                # differential drive model
-            ddist = delta_dist + random.gauss(0, math.sqrt(dist_rand_val))
-            dyaw = delta_yaw + random.gauss(0, math.sqrt(yaw_rand_val))
+            # differential drive model
+            ddist = delta_dist + nrand(dist_rand_val)
+            dyaw  = delta_yaw  + nrand(yaw_rand_val)
 
             yaw = particle.pose.yaw
             t = yaw + dyaw / 2.0
             x = particle.pose.x + ddist * math.cos(t)
             y = particle.pose.y + ddist * math.sin(t)
             yaw += dyaw
-            
+
+            # yaw normalization (-pi ~ pi)
+            while yaw < -math.pi:
+                yaw += 2.0 * math.pi
+            while yaw > math.pi:
+                yaw -= 2.0 * math.pi
+
             # update particle set
             particle.pose.update(x, y, yaw)
 
             # heuristic as reliability transition model
-            decay_rate = 1.0 - (self.reliability_transition_coef[0] * ddist**2 + self.reliability_transition_coef[1] * dyaw**2)
+            decay_rate = 1.0 - (self.reliability_transition_coef[0] * ddist**2 +
+                                self.reliability_transition_coef[1] * dyaw**2)
             if decay_rate <= 0.0:
-                decay_rate = 1.0e-6
-                
+                decay_rate = 1.0e-5  # C++과 동일하게 최소값 설정
+
             # update reliability set
             self.reliability_set[index] *= decay_rate
+
+
+
+"""
+            // differential drive model
+            double yaw = mclPose_.getYaw();
+            double t = yaw + deltaYaw / 2.0;
+            double x = mclPose_.getX() + deltaDist * cos(t);
+            double y = mclPose_.getY() + deltaDist * sin(t);
+            yaw += deltaYaw;
+            mclPose_.setPose(x, y, yaw);
+            double dist2 = deltaDist * deltaDist;
+            double yaw2 = deltaYaw * deltaYaw;
+            double distRandVal = dist2 * odomNoiseDDM_[0] + yaw2 * odomNoiseDDM_[1];
+            double yawRandVal = dist2 * odomNoiseDDM_[2] + yaw2 * odomNoiseDDM_[3];
+            for (int i = 0; i < particlesNum_; ++i) {
+                double ddist = deltaDist + nrand(distRandVal);
+                double dyaw = deltaYaw + nrand(yawRandVal);
+                double yaw = particles_[i].getYaw();
+                double t = yaw + dyaw / 2.0;
+                double x = particles_[i].getX() + ddist * cos(t);
+                double y = particles_[i].getY() + ddist * sin(t);
+                yaw += dyaw;
+                particles_[i].setPose(x, y, yaw);
+                if (estimateReliability_) {
+                    double decayRate = 1.0 - (relTransDDM_[0] * ddist * ddist + relTransDDM_[1] * dyaw * dyaw);
+                    if (decayRate <= 0.0)
+                        decayRate = 10.0e-6;
+                    reliabilities_[i] *= decayRate;
+                }
+            }
+"""
 
 # ----------------------------------------------------------------------------------------------------
 
@@ -225,23 +296,33 @@ class RMCLocalizerROS(Node):
         self.publisher_ = self.create_publisher(String, 'topic', 10)
         self.i = 0
         timer_period = 0.5
-        self.timer = self.create_timer(timer_period, self.timer_callback)
+        self.timer = self.create_timer(timer_period, self.callback_timer)
 
         # callback odom
         self._prev_time = 0.0
+        self.is_initialized = False
 
         # subscribers
-        self.sub_initial_pose = self.create_subscription(
+        self.subscriber_initialpose = self.create_subscription(
             PoseWithCovarianceStamped,
             '/initialpose',
             self.callback_initialpose,
+            10
+        )
+        self.subscriber_odom = self.create_subscription(
+            Odometry,
+            '/robot_0/odom',
+            self.callback_odom,
             10
         )
 
         # publishers
         self.particles_pub = self.create_publisher(PoseArray, 'particle_set', 10)
 
-    def timer_callback(self):
+    def callback_timer(self):
+        # step 2
+        self._rmclocalizer.update_pose_by_motion_model()  
+
         if hasattr(self._rmclocalizer, 'particle_set'):
             self.publish_particle_set(self._rmclocalizer.particle_set)
 
@@ -268,7 +349,7 @@ class RMCLocalizerROS(Node):
         # mark as initialized
         self._is_initialized = True
 
-    def odom_callback(self, msg: Odometry):
+    def callback_odom(self, msg: Odometry):
         """
         Odometry 메시지로부터 델타 이동량과 yaw를 업데이트
 
@@ -297,20 +378,20 @@ class RMCLocalizerROS(Node):
             return
 
         # extract data from Odometry message
-        self.odom_pose_stamp = msg.header.stamp
-        self.delta_x += msg.twist.twist.linear.x * delta_time
-        self.delta_y += msg.twist.twist.linear.y * delta_time
-        self.delta_dist += msg.twist.twist.linear.x * delta_time
-        self.delta_yaw += msg.twist.twist.angular.z * delta_time
+        self._rmclocalizer.odom_pose_stamp = msg.header.stamp
+        self._rmclocalizer.delta_x += msg.twist.twist.linear.x * delta_time
+        self._rmclocalizer.delta_y += msg.twist.twist.linear.y * delta_time
+        self._rmclocalizer.delta_dist += msg.twist.twist.linear.x * delta_time
+        self._rmclocalizer.delta_yaw += msg.twist.twist.angular.z * delta_time
 
         # normalize yaw
-        while self.delta_yaw < -math.pi:
-            self.delta_yaw += 2.0 * math.pi
-        while self.delta_yaw > math.pi:
-            self.delta_yaw -= 2.0 * math.pi
+        while self._rmclocalizer.delta_yaw < -math.pi:
+            self._rmclocalizer.delta_yaw += 2.0 * math.pi
+        while self._rmclocalizer.delta_yaw > math.pi:
+            self._rmclocalizer.delta_yaw -= 2.0 * math.pi
 
-        # .
-        self.delta_time_sum += delta_time
+        # 
+        self._rmclocalizer.delta_time_sum += delta_time
 
         # extract yaw from quaternion
         q = msg.pose.pose.orientation
@@ -318,7 +399,7 @@ class RMCLocalizerROS(Node):
         _, _, yaw = r.as_euler('xyz')  # roll, pitch, yaw (radians)
 
         # update odom pose
-        self.odom_pose.update(
+        self._rmclocalizer.odom_pose.update(
             msg.pose.pose.position.x,
             msg.pose.pose.position.y,
             yaw
