@@ -13,20 +13,17 @@ from geometry_msgs.msg import PoseWithCovarianceStamped
 from nav_msgs.msg import Odometry                          # Odometry
 from geometry_msgs.msg import Pose as RosPose, PoseArray   # (visualization)
 
-
 # python dependencies
 from dataclasses import dataclass, field
 import math
 import random                                              # random.gauss
 from scipy.spatial.transform import Rotation as R          # quaternion -> euler
 
+
 def nrand(n: float) -> float:
-    """
-    C++ nrand()와 동일하게 동작하는 Box-Muller 방식의 Gaussian 난수 생성기
-    입력 n은 표준편차 σ
-    """
-    u1 = random.random()  # 0~1 uniform
-    u2 = random.random()  # 0~1 uniform
+    """입력 n = 표준편차 σ"""
+    u1 = random.random()
+    u2 = random.random()
     z0 = math.sqrt(-2.0 * math.log(u1)) * math.cos(2.0 * math.pi * u2)
     return n * z0
 
@@ -115,7 +112,7 @@ class RMCLocalizer:
         self.delta_x = self.delta_y = self.delta_dist = self.delta_yaw = 0
         self.total_abs_delta_x = self.total_abs_delta_y = self.total_abs_delta_dist = self.total_abs_delta_yaw = 0
         self.delta_time_sum = 0
-        self.odom_noise = [1.0, 0.5, 0.5, 1.0]
+        self.odom_noise = [0.1, 0.05, 0.05, 0.1]
         self.reliability_transition_coef = [0.0, 0.0]
 
     def initialize_particle_set(self):
@@ -232,12 +229,6 @@ class RMCLocalizer:
             y = particle.pose.y + ddist * math.sin(t)
             yaw += dyaw
 
-            # yaw normalization (-pi ~ pi)
-            while yaw < -math.pi:
-                yaw += 2.0 * math.pi
-            while yaw > math.pi:
-                yaw -= 2.0 * math.pi
-
             # update particle set
             particle.pose.update(x, y, yaw)
 
@@ -249,38 +240,6 @@ class RMCLocalizer:
 
             # update reliability set
             self.reliability_set[index] *= decay_rate
-
-
-
-"""
-            // differential drive model
-            double yaw = mclPose_.getYaw();
-            double t = yaw + deltaYaw / 2.0;
-            double x = mclPose_.getX() + deltaDist * cos(t);
-            double y = mclPose_.getY() + deltaDist * sin(t);
-            yaw += deltaYaw;
-            mclPose_.setPose(x, y, yaw);
-            double dist2 = deltaDist * deltaDist;
-            double yaw2 = deltaYaw * deltaYaw;
-            double distRandVal = dist2 * odomNoiseDDM_[0] + yaw2 * odomNoiseDDM_[1];
-            double yawRandVal = dist2 * odomNoiseDDM_[2] + yaw2 * odomNoiseDDM_[3];
-            for (int i = 0; i < particlesNum_; ++i) {
-                double ddist = deltaDist + nrand(distRandVal);
-                double dyaw = deltaYaw + nrand(yawRandVal);
-                double yaw = particles_[i].getYaw();
-                double t = yaw + dyaw / 2.0;
-                double x = particles_[i].getX() + ddist * cos(t);
-                double y = particles_[i].getY() + ddist * sin(t);
-                yaw += dyaw;
-                particles_[i].setPose(x, y, yaw);
-                if (estimateReliability_) {
-                    double decayRate = 1.0 - (relTransDDM_[0] * ddist * ddist + relTransDDM_[1] * dyaw * dyaw);
-                    if (decayRate <= 0.0)
-                        decayRate = 10.0e-6;
-                    reliabilities_[i] *= decayRate;
-                }
-            }
-"""
 
 # ----------------------------------------------------------------------------------------------------
 
@@ -295,7 +254,7 @@ class RMCLocalizerROS(Node):
         # timer
         self.publisher_ = self.create_publisher(String, 'topic', 10)
         self.i = 0
-        timer_period = 0.5
+        timer_period = 0.01 #s
         self.timer = self.create_timer(timer_period, self.callback_timer)
 
         # callback odom
@@ -378,7 +337,7 @@ class RMCLocalizerROS(Node):
             return
 
         # extract data from Odometry message
-        self._rmclocalizer.odom_pose_stamp = msg.header.stamp
+        odom_pose_timestamp = msg.header.stamp
         self._rmclocalizer.delta_x += msg.twist.twist.linear.x * delta_time
         self._rmclocalizer.delta_y += msg.twist.twist.linear.y * delta_time
         self._rmclocalizer.delta_dist += msg.twist.twist.linear.x * delta_time
