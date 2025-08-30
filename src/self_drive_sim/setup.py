@@ -29,9 +29,9 @@ setup(
             f"train = {package_name}.train:main",
             f"test = {package_name}.test:main",
             f"debug = {package_name}.debug:main",
-            # add custom node
+            # custom node
             'rmc_localizer_node = self_drive_sim.agent.agent:main'
-            
+            'rmc_localizer_node = self_drive_sim.agent.agent:main'
         ],
     },
 )

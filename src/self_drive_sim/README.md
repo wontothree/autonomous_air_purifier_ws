@@ -75,7 +75,7 @@ apt-get install -y ros-humble-teleop-twist-keyboard
 ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args --remap cmd_vel:=/robot_0/cmd_vel
 ```
 
-# 🗨️Published Topics
+# 🗨️ Published Topics
 
 - /clicked_point 
 - /clock          

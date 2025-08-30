@@ -12,7 +12,6 @@ from std_msgs.msg import String
 from geometry_msgs.msg import PoseWithCovarianceStamped
 from nav_msgs.msg import Odometry                          # Odometry
 from sensor_msgs.msg import LaserScan                      # LaserScan
-from message_filters import Subscriber, ApproximateTimeSynchronizer
 from geometry_msgs.msg import Pose as RosPose, PoseArray   # (visualization)
 
 # python dependencies
@@ -305,15 +304,6 @@ class RMCLocalizerROS(Node):
         self.is_initialized = False
 
         # subscribers
-        self.front_scan_sub = Subscriber(self, LaserScan, front_scan_sub_topic_name)
-        self.back_scan_sub  = Subscriber(self, LaserScan, back_scan_sub_topic_name)
-        self.ts = ApproximateTimeSynchronizer(
-            [self.front_scan_sub, self.back_scan_sub],
-            queue_size=10,
-            slop=0.05  # 최대 시간 차 허용치 (초)
-        )
-        self.ts.registerCallback(self.callback_scan)
-
         self.subscriber_initialpose = self.create_subscription(
             PoseWithCovarianceStamped,
             initialpose_sub_topic_name,
@@ -328,12 +318,20 @@ class RMCLocalizerROS(Node):
             10
         )
 
+        self.subscriber_scan = self.create_subscription(
+            LaserScan,
+            front_scan_sub_topic_name,
+            self.callback_scan,
+            10
+        )
+
         # publishers
         self.particles_pub = self.create_publisher(
             PoseArray, 
             particles_pub_topic_name, 
             10
         )
+
         self.scan_pub = self.create_publisher(
             LaserScan,
             'merged_scan',
@@ -430,8 +428,8 @@ class RMCLocalizerROS(Node):
 
         self._prev_time = curr_time
     
-    def callback_scan(self, front_scan_msg: LaserScan, back_scan_msg: LaserScan):
-        self.scan = list(chain(front_scan_msg.ranges, back_scan_msg.ranges))
+    def callback_scan(self, front_scan_msg: LaserScan):
+        self.scan = front_scan_msg
         self.is_scan_received = True
 
     def callback_map(self):
@@ -467,27 +465,29 @@ class RMCLocalizerROS(Node):
         self.particles_pub.publish(pose_array_msg)
 
     def publish_scan(self):
-        """
-        self.scan (통합된 front + back 라이다 데이터)을 LaserScan 메시지로 퍼블리시
-        """
         if not hasattr(self, 'scan') or self.scan is None:
             return
 
         scan_msg = LaserScan()
         scan_msg.header.stamp = self.get_clock().now().to_msg()
-        scan_msg.header.frame_id = 'odom'  # 필요에 따라 frame_id 수정
-        scan_msg.angle_min = -math.pi / 2          # 예: -90도
-        scan_msg.angle_max = math.pi / 2           # 예: 90도
-        scan_msg.angle_increment = (scan_msg.angle_max - scan_msg.angle_min) / len(self.scan)
-        scan_msg.time_increment = 0.0
-        scan_msg.scan_time = 0.1                   # 주기 설정
-        scan_msg.range_min = 0.05
-        scan_msg.range_max = 10.0
-        scan_msg.ranges = self.scan
-        scan_msg.intensities = [1.0] * len(self.scan)
+        scan_msg.header.frame_id = self.scan.header.frame_id  # 원본 frame 사용
+
+        # 원본 LaserScan 데이터 복사
+        scan_msg.angle_min = self.scan.angle_min
+        scan_msg.angle_max = self.scan.angle_max
+        scan_msg.angle_increment = self.scan.angle_increment
+        scan_msg.time_increment = self.scan.time_increment
+        scan_msg.scan_time = self.scan.scan_time
+        scan_msg.range_min = self.scan.range_min
+        scan_msg.range_max = self.scan.range_max
+
+        # list로 변환
+        scan_msg.ranges = list(self.scan.ranges)
+        scan_msg.intensities = list(self.scan.intensities) if self.scan.intensities else [1.0] * len(self.scan.ranges)
 
         # 퍼블리시
         self.scan_pub.publish(scan_msg)
+
 
 # ----------------------------------------------------------------------------------------------------
 
