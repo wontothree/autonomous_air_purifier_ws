@@ -126,3 +126,12 @@ ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args --remap cmd_vel:
 # Nodes
 
 `rmc_localizer_node`
+
+# Visualization
+
+```bash
+cd ~/autonomous_navigation_ws
+source install/setup.bash
+cd src/self_drive_sim/self_drive_sim/agent
+python3 agent.py
+```

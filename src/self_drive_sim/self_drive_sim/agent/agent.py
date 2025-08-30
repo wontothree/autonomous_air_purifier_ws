@@ -11,6 +11,8 @@ from rclpy.node import Node
 from std_msgs.msg import String
 from geometry_msgs.msg import PoseWithCovarianceStamped
 from nav_msgs.msg import Odometry                          # Odometry
+from sensor_msgs.msg import LaserScan                      # LaserScan
+from message_filters import Subscriber, ApproximateTimeSynchronizer
 from geometry_msgs.msg import Pose as RosPose, PoseArray   # (visualization)
 
 # python dependencies
@@ -18,6 +20,8 @@ from dataclasses import dataclass, field
 import math
 import random                                              # random.gauss
 from scipy.spatial.transform import Rotation as R          # quaternion -> euler
+from itertools import chain                                # chain
+
 
 
 def nrand(n: float) -> float:
@@ -92,7 +96,20 @@ class RMCLocalizer:
     def __init__(self, particles_num=100,
                  initial_noise_x=0.02,
                  initial_noise_y=0.02,
-                 initial_noise_yaw=0.02
+                 initial_noise_yaw=0.02,
+
+                 # class conditional measurment model
+                 map_resolution=0.2, # meter
+                 map_origin={'x': 0.0, 'y': 0.0, 'yaw': 0.0},
+                 map_width=50,
+                 map_height=50,
+                 known_prior=0.5,
+                 unknown_prior=0.5,
+                 z_hit=0.9,
+                 z_max=0.05,
+                 z_rand=0.05,
+                 unknown_lambda=1.0,
+                 hit_variance=0.1,
                  ):
         
         # particle
@@ -236,15 +253,44 @@ class RMCLocalizer:
             decay_rate = 1.0 - (self.reliability_transition_coef[0] * ddist**2 +
                                 self.reliability_transition_coef[1] * dyaw**2)
             if decay_rate <= 0.0:
-                decay_rate = 1.0e-5  # C++과 동일하게 최소값 설정
+                decay_rate = 1.0e-5
 
             # update reliability set
             self.reliability_set[index] *= decay_rate
 
+    def is_on_map(self, u, v, dist_map):
+        """
+        맵 범위 안인지 확인
+        """
+        return 0 <= u < dist_map.shape[1] and 0 <= v < dist_map.shape[0]
+    
+    def xy2uv(self, x, y, map_origin, map_resolution):
+        """
+        (x, y) 월드 좌표를 맵 좌표(u, v)로 변환
+        map_origin: {'x': x_origin, 'y': y_origin, 'yaw': yaw_origin}
+        """
+        dx = x - map_origin['x']
+        dy = y - map_origin['y']
+        yaw = -map_origin['yaw']  # C++과 동일하게 회전 반영
+        xx = dx * math.cos(yaw) - dy * math.sin(yaw)
+        yy = dx * math.sin(yaw) + dy * math.cos(yaw)
+        u = int(xx / map_resolution)
+        v = int(yy / map_resolution)
+        return u, v
+
+
+
 # ----------------------------------------------------------------------------------------------------
 
 class RMCLocalizerROS(Node):
-    def __init__(self, rmclocalizer):
+    def __init__(self, rmclocalizer,
+                 initialpose_sub_topic_name='/initialpose',
+                 odom_sub_topic_name='/robot_0/odom',
+                 front_scan_sub_topic_name='/robot_0/base_sensor_lidar_front_controller/out',
+                 back_scan_sub_topic_name='/robot_0/base_sensor_lidar_back_controller/out',
+                 particles_pub_topic_name='particles',
+                 timer_period=0.01, # s
+                 ):
         super().__init__('rmc_localizer_node') # node name
 
         # MCLocalizer 객체
@@ -252,9 +298,6 @@ class RMCLocalizerROS(Node):
         self._is_initialized = False
 
         # timer
-        self.publisher_ = self.create_publisher(String, 'topic', 10)
-        self.i = 0
-        timer_period = 0.01 #s
         self.timer = self.create_timer(timer_period, self.callback_timer)
 
         # callback odom
@@ -262,28 +305,49 @@ class RMCLocalizerROS(Node):
         self.is_initialized = False
 
         # subscribers
+        self.front_scan_sub = Subscriber(self, LaserScan, front_scan_sub_topic_name)
+        self.back_scan_sub  = Subscriber(self, LaserScan, back_scan_sub_topic_name)
+        self.ts = ApproximateTimeSynchronizer(
+            [self.front_scan_sub, self.back_scan_sub],
+            queue_size=10,
+            slop=0.05  # 최대 시간 차 허용치 (초)
+        )
+        self.ts.registerCallback(self.callback_scan)
+
         self.subscriber_initialpose = self.create_subscription(
             PoseWithCovarianceStamped,
-            '/initialpose',
+            initialpose_sub_topic_name,
             self.callback_initialpose,
             10
         )
+
         self.subscriber_odom = self.create_subscription(
             Odometry,
-            '/robot_0/odom',
+            odom_sub_topic_name,
             self.callback_odom,
             10
         )
 
         # publishers
-        self.particles_pub = self.create_publisher(PoseArray, 'particle_set', 10)
+        self.particles_pub = self.create_publisher(
+            PoseArray, 
+            particles_pub_topic_name, 
+            10
+        )
+        self.scan_pub = self.create_publisher(
+            LaserScan,
+            'merged_scan',
+            10
+        )
 
     def callback_timer(self):
         # step 2
         self._rmclocalizer.update_pose_by_motion_model()  
 
         if hasattr(self._rmclocalizer, 'particle_set'):
-            self.publish_particle_set(self._rmclocalizer.particle_set)
+            self.publish_particles(self._rmclocalizer.particle_set)
+        
+        self.publish_scan()
 
     def callback_initialpose(self, msg: PoseWithCovarianceStamped):
         # extract yaw from quaternion
@@ -365,8 +429,15 @@ class RMCLocalizerROS(Node):
         )
 
         self._prev_time = curr_time
+    
+    def callback_scan(self, front_scan_msg: LaserScan, back_scan_msg: LaserScan):
+        self.scan = list(chain(front_scan_msg.ranges, back_scan_msg.ranges))
+        self.is_scan_received = True
 
-    def publish_particle_set(self, particle_set):
+    def callback_map(self):
+        pass
+
+    def publish_particles(self, particle_set):
         """
         Publish particle set as PoseArray for RViz visualization
         """
@@ -395,6 +466,28 @@ class RMCLocalizerROS(Node):
 
         self.particles_pub.publish(pose_array_msg)
 
+    def publish_scan(self):
+        """
+        self.scan (통합된 front + back 라이다 데이터)을 LaserScan 메시지로 퍼블리시
+        """
+        if not hasattr(self, 'scan') or self.scan is None:
+            return
+
+        scan_msg = LaserScan()
+        scan_msg.header.stamp = self.get_clock().now().to_msg()
+        scan_msg.header.frame_id = 'odom'  # 필요에 따라 frame_id 수정
+        scan_msg.angle_min = -math.pi / 2          # 예: -90도
+        scan_msg.angle_max = math.pi / 2           # 예: 90도
+        scan_msg.angle_increment = (scan_msg.angle_max - scan_msg.angle_min) / len(self.scan)
+        scan_msg.time_increment = 0.0
+        scan_msg.scan_time = 0.1                   # 주기 설정
+        scan_msg.range_min = 0.05
+        scan_msg.range_max = 10.0
+        scan_msg.ranges = self.scan
+        scan_msg.intensities = [1.0] * len(self.scan)
+
+        # 퍼블리시
+        self.scan_pub.publish(scan_msg)
 
 # ----------------------------------------------------------------------------------------------------
 
@@ -433,7 +526,7 @@ def print_global_map(map_path, step=5):
     # 벽 표시
     grid_display[wall_grid] = '#'
 
-    # 방 ID 표시 (0-9, 10-15 -> A-F)
+    # Room ID (0-9, 10-15 -> A-F)
     def room_id_to_char(room_id):
         if room_id < 10:
             return str(room_id)
@@ -448,27 +541,41 @@ def print_global_map(map_path, step=5):
             if grid_display[x, y] not in ('#', 'S'):
                 grid_display[x, y] = char
 
-    # 스테이션 표시
+    # Station
     gx, gy = map_info.pos2grid(station_pos)
     row = int(gx)
     col = int(gy)
     if 0 <= row < height and 0 <= col < width:
         grid_display[row, col] = 'S'
 
-    # -----------------------------
-    # 좌표계와 함께 출력
-    # 상단 y좌표 (열)
-    y_labels = '   '
-    for j in range(0, width, step):
-        label = f"{j:<{step}}"
-        y_labels += label
-    print(y_labels)
+    # Print
+    is_coordinate = True
 
-    # 각 행 출력 (왼쪽 x좌표)
-    for i in range(height):
-        x_label = f"{i:<2d}" if i % step == 0 else "  "
-        line = x_label + ' ' + ''.join(grid_display[i, :])
-        print(line)
+    if is_coordinate: # Map with coordinate
+        x_label_width = 3
+        y_labels = " _|"
+
+        for j in range(0, width, step):
+            label = f"{j:<{step-1}}|"
+            y_labels += label
+        print(y_labels)
+
+        # X
+        for i in range(height):
+            if i % step == 0:
+                x_label = f"{i:>2} "
+            elif (i + 1) % step == 0:
+                x_label = " _ "
+            else:
+                x_label = "   "
+
+            line = x_label + ''.join(grid_display[i, :])
+            print(line)
+            
+    else: # Map without coordinate
+        for i in range(height):
+            line = ''.join(grid_display[i, :])
+            print(line)
 
 # ----------------------------------------------------------------------------------------------------
 
@@ -485,7 +592,7 @@ def main(args=None):
 
 
 if __name__ == '__main__':
-    # map_file = './../../worlds/map3.npz'
-    # print_global_map(map_file, step=5)
+    map_file = './../../worlds/map3.npz'
+    print_global_map(map_file, step=5)
 
-    main()
+    # main()
