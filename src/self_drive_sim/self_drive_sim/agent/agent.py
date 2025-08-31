@@ -1,7 +1,10 @@
 from self_drive_sim.agent.interfaces import Observation, Info, MapInfo
 
+from self_drive_sim.simulation.floor_map import FloorMap
+
 import math
 import numpy as np
+import os
 
 class Agent:
     def __init__(self, logger):
@@ -345,3 +348,108 @@ class Agent:
         waypoints = interpolate_waypoints(waypoints, step=0.2)
         return waypoints
 
+
+
+
+
+
+
+# -----
+
+def print_global_map(map_path, step=5):
+    """
+    주어진 FloorMap 파일을 읽고, 터미널용 맵을 출력합니다.
+    - 벽: '#'
+    - 빈 공간: '.'
+    - 방 ID: 0-9, 10-15 -> A-F (16진수)
+    - 스테이션: 'S'
+    - 좌표계: 상단(y), 좌측(x) 5단위 표시
+
+    using method ---
+
+    map_file = './../../worlds/map2.npz'
+    print_global_map(map_file, step=5)
+
+    """
+    # Generate FloorMap
+    if not os.path.exists(map_path):
+        raise FileNotFoundError(f"Map file not found: {map_path}")
+    floor_map = FloorMap.from_file(map_path)
+
+    # Generate Mapinfo
+    pollution_end_time = 10.0
+    starting_pos = floor_map.station_pos
+    starting_angle = 0.0
+    map_info = floor_map.to_map_info(pollution_end_time, starting_pos, starting_angle)
+
+    wall_grid = map_info.wall_grid
+    station_pos = map_info.station_pos
+
+    height, width = wall_grid.shape
+    grid_display = np.full((height, width), '.', dtype=str)  # 빈 공간은 '.'
+
+    # 벽 표시
+    grid_display[wall_grid] = '#'
+
+    # Room ID (0-9, 10-15 -> A-F)
+    def room_id_to_char(room_id):
+        if room_id < 10:
+            return str(room_id)
+        else:
+            return chr(ord('A') + (room_id - 10) % 6)  # 10->A, 11->B ... 15->F, 16->A 반복
+
+    for room_id in range(map_info.num_rooms):
+        cells = map_info.get_cells_in_room(room_id)
+        char = room_id_to_char(room_id)
+        for x, y in cells:
+            # 벽이나 스테이션이 아니면 덮어쓰기
+            if grid_display[x, y] not in ('#', 'S'):
+                grid_display[x, y] = char
+
+    # Station
+    gx, gy = map_info.pos2grid(station_pos)
+    row = int(gx)
+    col = int(gy)
+    if 0 <= row < height and 0 <= col < width:
+        grid_display[row, col] = 'S'
+
+    # Print
+    is_coordinate = True
+
+    if is_coordinate: # Map with coordinate
+        x_label_width = 3
+        y_labels = " _|"
+
+        for j in range(0, width, step):
+            label = f"{j:<{step-1}}|"
+            y_labels += label
+        print(y_labels)
+
+        # X
+        for i in range(height):
+            if i % step == 0:
+                x_label = f"{i:>2} "
+            elif (i + 1) % step == 0:
+                x_label = " _ "
+            else:
+                x_label = "   "
+
+            line = x_label + ''.join(grid_display[i, :])
+            print(line)
+            
+    else: # Map without coordinate
+        for i in range(height):
+            line = ''.join(grid_display[i, :])
+            print(line)
+
+    print(map_file.starting_pos)
+
+
+# ----------------------------------------------------------------------------------------------------
+
+
+if __name__ == '__main__':
+    map_file = './../../worlds/map2.npz'
+    print_global_map(map_file, step=5)
+
+    # main()
