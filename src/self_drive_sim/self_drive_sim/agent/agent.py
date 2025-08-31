@@ -1,12 +1,5 @@
 from self_drive_sim.agent.interfaces import Observation, Info, MapInfo
 
-# ROS dependencies
-import rclpy
-from rclpy.node import Node
-from nav_msgs.msg import Odometry                          # Odometry
-from geometry_msgs.msg import PoseStamped                  # PoseStamped
-
-# Python dependencies
 import math
 import numpy as np
 
@@ -14,6 +7,23 @@ class Agent:
     def __init__(self, logger):
         self.logger = logger
         self.steps = 0
+
+        self.map_info = None
+        self.current_robot_pose = (0.0, 0.0, 0.0)
+        #self.pollution_state = (0.0, 0.0)
+        self.target_position = None
+        self.room_centers = []
+        self.pollution_end_time = 0.0
+
+        # Mission planning
+        self.polluted_rooms_queue = []      # 처리해야 할 오염된 방의 대기열
+        self.previous_pollution_data = None # 이전 스텝의 오염도
+        self.CLEAN_THRESHOLD = 0.1        # 청정 완료 기준
+
+        # Finite state machine
+        self.state = 'IDLE' # 'IDLE', 'NAVIGATING', 'CLEANING', 'DONE'
+
+        self.clean_start_time = None
 
     def initialize_map(self, map_info: MapInfo):
         """
@@ -58,9 +68,28 @@ class Agent:
         # self.log(f"Room Grid Shape: {map_info.room_grid.shape}")
         # self.log("======================================================")
         # # ---------------------------------------------
+
+        self.map_info = map_info
+        self.pollution_end_time = map_info.pollution_end_time
+        self.target_position = None
+        self.state = 'IDLE'
+        self.previous_pollution_data = np.zeros(self.map_info.num_rooms)
         
-        # # 나중에 다른 함수(예: act)에서도 맵 정보를 사용하기 위해 클래스 변수에 저장합니다.
-        # self.map_info = map_info
+        # initialize robot pose
+        start_pos = map_info.starting_pos
+        start_angle = map_info.starting_angle
+        self.current_robot_pose = (start_pos[0], start_pos[1], start_angle)
+        
+        # Center world coordinate of every rooms
+        self.room_centers = []
+        for room_id in range(self.map_info.num_rooms):
+            cells = self.map_info.get_cells_in_room(room_id)
+            if not cells:
+                self.room_centers.append(self.map_info.station_pos)
+                continue
+            center_grid = (sum(c[0] for c in cells) / len(cells), sum(c[1] for c in cells) / len(cells))
+            self.room_centers.append(self.map_info.grid2pos(center_grid))
+        # self.log(f"Calculated Room Centers (World Coords): {self.room_centers}")
 
     def act(self, observation: Observation):
         """
@@ -85,31 +114,86 @@ class Agent:
         MODE가 0인 경우: 이동 명령, Twist 컨트롤로 선속도(LINEAR) 및 각속도(ANGULAR) 조절. 최대값 1m/s, 2rad/s
         MODE가 1인 경우: 청정 명령, 제자리에서 공기를 청정. LINEAR, ANGULAR는 무시됨. 청정 명령을 유지한 후 1초가 지나야 실제로 청정이 시작됨
         """
-        action = (0, 0.5, 1.0)
 
-        # log 사용법 예시: print를 사용하면 비정상적으로 출력되므로 log를 사용
-        if self.steps % 50 == 0:
-            self.log(observation['sensor_tof_left'])
+        robot_pollution = observation['sensor_pollution']
+        current_time = self.steps * 0.1
+
+        # air_sensor_pollution 없으면 이전 action 유지
+        if observation['air_sensor_pollution'] is None:
+            self.steps += 1
+            if self.state == 'NAVIGATING' and self.target_position:
+                return self.go_to_goal(self.current_robot_pose, self.target_position)
+            return (0, 0.0, 0.0)
+
+        # 1. 새로운 오염 발생 감지 및 polluted_rooms_queue 업데이트
+        current_pollution_data = observation['air_sensor_pollution']
+        self.mission_planner(current_pollution_data)
+
+        action = (0, 0.0, 0.0)
+
+        # -------------------
+        # FSM + Waypoint Logic
+        # -------------------
+
+        # IDLE 상태
+        if self.state == 'IDLE':
+            if self.polluted_rooms_queue:  # 오염된 방 탐지 시 이동
+                target_room_id = self.polluted_rooms_queue[0]
+                self.target_position = self.room_centers[target_room_id]
+                self.waypoints = self.global_planner(self.current_robot_pose[:2], self.target_position)
+                self.current_waypoint_idx = 1
+                self.state = 'NAVIGATING'
+                self.log(f"Navigating to Room {target_room_id} via {self.waypoints}")
+            elif current_time >= self.pollution_end_time:  # 오염원 끝나면 도킹
+                self.target_position = self.map_info.station_pos
+                self.waypoints = self.global_planner(self.current_robot_pose[:2], self.target_position)
+                self.current_waypoint_idx = 1
+                self.state = 'NAVIGATING'
+                self.log("Returning to station via waypoints.")
+
+        # NAVIGATING 상태
+        elif self.state == 'NAVIGATING':
+            if self.current_waypoint_idx < len(self.waypoints):
+                goal_wp = self.waypoints[self.current_waypoint_idx]
+                action = self.go_to_goal(self.current_robot_pose, goal_wp)
+                mode, _, _ = action
+                if mode == 1:  # waypoint 도착
+                    self.current_waypoint_idx += 1
+            else:
+                # 모든 waypoint 도착
+                action = self.go_to_goal(self.current_robot_pose, self.target_position)
+                mode, _, _ = action
+                if mode == 1:
+                    if self.target_position == self.map_info.station_pos:
+                        self.state = 'DONE'
+                        self.log("Reached station. Task DONE.")
+                    else:
+                        self.state = 'CLEANING'
+                        self.clean_start_time = current_time
+                        self.current_cleaning_room_id = self.polluted_rooms_queue[0]  # 현재 청소 방 저장
+                        self.log(f"Start cleaning at {self.target_position}")
+
+        # CLEANING 상태
+        elif self.state == 'CLEANING':
+            action = (1, 0.0, 0.0)
+            target_room_id = self.current_cleaning_room_id
+
+            if target_room_id is not None and observation['air_sensor_pollution'] is not None:
+                room_pollution = observation['air_sensor_pollution'][target_room_id]
+                if room_pollution < self.CLEAN_THRESHOLD:
+                    self.log(f"Cleaning complete for target {self.target_position}.")
+                    self.polluted_rooms_queue.pop(0)
+                    self.state = 'IDLE'
+                    self.target_position = None
+                    self.waypoints = []
+                    self.current_waypoint_idx = 0
+                    self.current_cleaning_room_id = None
+
+        # DONE 상태
+        elif self.state == 'DONE':
+            action = (0, 0.0, 0.0)
 
         self.steps += 1
-
-        # if self.steps % 10 == 0:
-        #     # 1. 로봇 위치의 현재 오염도
-        #     robot_pollution = observation['sensor_pollution']
-
-        #     # --- 수정된 부분: None 타입인지 확인 ---
-        #     if robot_pollution is not None:
-        #         # None이 아닐 때만 소수점 형태로 출력
-        #         self.log(f"*****Robot's current pollution reading: {robot_pollution:.4f}")
-        #     else:
-        #         # None일 경우, 다른 메시지를 출력하여 상황을 알림
-        #         self.log("*****Robot's current pollution reading: Not available (None)")
-        #     # ------------------------------------
-
-        #     # 2. 방별 고정 센서의 오염도
-        #     air_sensor_data = observation['air_sensor_pollution']
-        #     self.log(f"*****Stationary air sensor readings: {air_sensor_data}")
-
         return action
 
     def learn(
@@ -136,7 +220,12 @@ class Agent:
         all_pollution: np.ndarray, 거치형 에어 센서가 없는 방까지 포함한 오염도 정보
         ---
         """
-        pass
+
+        self.current_robot_pose = (info["robot_position"][0], info["robot_position"][1], info["robot_angle"])
+        #self.pollution_state = info['all_pollution']
+
+        #self.log(f"Robot pose: {self.current_robot_pose}")
+        #self.log(f"Pollution State {self.pollution_state}")
 
     def reset(self):
         """
@@ -151,88 +240,108 @@ class Agent:
         ROS Node의 logger를 호출.
         """
         self.logger(str(msg))
-    
 
-class AgentROS(Node):
-    def __init__(self,
-                 odom_sub_topic_name='/robot_0/odom',
-                 timer_period=0.01, # s
-                 ):
-        super().__init__('agent_node') # node name
+    # additional functions
 
-        # Timer and subscribers
-        self.timer = self.create_timer(timer_period, self.callback_timer)
-        self.subscriber_odom = self.create_subscription(
-            Odometry,
-            odom_sub_topic_name,
-            self.callback_odom,
-            10
-        )
+    def go_to_goal(self, current_pose, target_pose):
+        ANGLE_TOLERANCE = math.radians(5)
+        DISTANCE_TOLERANCE = 0.15
+        MAX_LINEAR_VEL = 0.8
+        MIN_LINEAR_VEL = 0.05
+        MAX_ANGULAR_VEL = 1.5
+        KP_ANGLE = 2.0
+        KP_DISTANCE = 1.0
 
-        # Publishers
-        self.pose_publisher = self.create_publisher(
-            PoseStamped,
-            '/robot_pose_stamped',
-            10
-        )
+        cx, cy, cyaw = current_pose
+        tx, ty = target_pose
 
-    def callback_timer(self):
-        pass
+        dist_error = math.hypot(tx - cx, ty - cy)
+        if dist_error < DISTANCE_TOLERANCE:
+            return (1, 0.0, 0.0)
 
-    def callback_odom(self, msg: Odometry):
-        # Extrack x and y
-        x_pos = msg.pose.pose.position.x
-        y_pos = msg.pose.pose.position.y
+        angle_to_target = math.atan2(ty - cy, tx - cx)
+        angle_error = angle_to_target - cyaw
+        while angle_error > math.pi: angle_error -= 2 * math.pi
+        while angle_error < -math.pi: angle_error += 2 * math.pi
 
-        # Extract yaw
-        orientation_q = msg.pose.pose.orientation
-        (roll, pitch, yaw) = self.euler_from_quaternion(orientation_q)
+        angular_vel = np.clip(KP_ANGLE * angle_error, -MAX_ANGULAR_VEL, MAX_ANGULAR_VEL)
+        linear_vel = KP_DISTANCE * dist_error
 
-        # print
-        self.get_logger().info(f'Received Odom: x={x_pos:.2f}, y={y_pos:.2f}, yaw={math.degrees(yaw):.2f}°')
+        angle_error_deg = abs(math.degrees(angle_error))
+        if angle_error_deg > 30:
+            scaling_factor = max(0, 1 - (angle_error_deg - 30) / 60)
+            linear_vel *= scaling_factor
 
-        # Publish for visualizaiton in RViz
-        pose_stamped_msg = PoseStamped()
-        pose_stamped_msg.header = msg.header
-        pose_stamped_msg.pose = msg.pose.pose
-        self.pose_publisher.publish(pose_stamped_msg)
+        linear_vel = np.clip(linear_vel, MIN_LINEAR_VEL, MAX_LINEAR_VEL)
+        return (0, linear_vel, angular_vel)
 
-    def euler_from_quaternion(self, quaternion):
+    def mission_planner(self, current_pollution_data):
         """
-        Quaternion 메시지로부터 Roll, Pitch, Yaw 각도를 계산하는 함수
+        새로운 오염 발생 감지 및 polluted_rooms_queue 업데이트
+
+        사용 멤버 변수:
+            - self.map_info.num_rooms : 방 개수 확인
+            - self.CLEAN_THRESHOLD : 청정 기준 임계값
+            - self.log(msg) : 로그 출력
+
+        변경 멤버 변수:
+            - self.polluted_rooms_queue : 새 오염이 발생한 방 ID를 추가
+            - self.previous_pollution_data : 현재 오염 데이터를 저장
         """
-        x = quaternion.x
-        y = quaternion.y
-        z = quaternion.z
-        w = quaternion.w
+        for room_id in range(self.map_info.num_rooms):
+            prev = self.previous_pollution_data[room_id]
+            curr = current_pollution_data[room_id]
+            if prev < self.CLEAN_THRESHOLD and curr >= self.CLEAN_THRESHOLD:
+                if room_id not in self.polluted_rooms_queue:
+                    self.log(f"New pollution detected in Room {room_id}.")
+                    self.polluted_rooms_queue.append(room_id)
 
-        # Roll (x-axis rotation)
-        t0 = +2.0 * (w * x + y * z)
-        t1 = +1.0 - 2.0 * (x * x + y * y)
-        roll_x = math.atan2(t0, t1)
-
-        # Pitch (y-axis rotation)
-        t2 = +2.0 * (w * y - z * x)
-        t2 = +1.0 if t2 > +1.0 else t2
-        t2 = -1.0 if t2 < -1.0 else t2
-        pitch_y = math.asin(t2)
-
-        # Yaw (z-axis rotation)
-        t3 = +2.0 * (w * z + x * y)
-        t4 = +1.0 - 2.0 * (y * y + z * z)
-        yaw_z = math.atan2(t3, t4)
-
-        return roll_x, pitch_y, yaw_z
-
-def main(args=None):
-    rclpy.init(args=args)
-
-    node = AgentROS()
-
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
+        # 현재 오염 상태를 다음 step을 위해 저장
+        self.previous_pollution_data = current_pollution_data
 
 
-# if __name__ == '__main__':
-    # main()
+    def global_planner(self, start_pos, goal_pos):
+        """
+        현재 위치와 목표 위치에 따라 장애물을 고려한 waypoint 리스트 반환.
+        직선 이동 가능한 구간은 직선으로 이동.
+        """
+        def is_close(pos1, pos2, tol=0.05):
+            return math.hypot(pos1[0] - pos2[0], pos1[1] - pos2[1]) < tol
+
+        # 주요 지점 정의
+        start = (2, 0)
+        outside = (1.6, 2.4)
+        room = (-1.4, -2.4)
+        station = (1.4, 3)
+
+        # start → goal 경로에 필요한 중간 waypoint 결정
+        mid_waypoints = []
+
+        if (is_close(start_pos, start) and is_close(goal_pos, room)) or (is_close(start_pos, room) and is_close(goal_pos, start)):
+            mid_waypoints = [(-1.4, 2.4)]
+        elif (is_close(start_pos, room) and is_close(goal_pos, station)) or (is_close(start_pos, station) and is_close(goal_pos, room)):
+            mid_waypoints = [(1.4, 0), (-1.4, 2.4)]
+        elif (is_close(start_pos, outside) and is_close(goal_pos, room)) or (is_close(start_pos, room) and is_close(goal_pos, outside)):
+            mid_waypoints = [(-1.4, 2.4)]
+
+        # 나머지는 직선 이동
+        waypoints = [start_pos] + mid_waypoints + [goal_pos]
+
+        # -------------------------------------------
+        # waypoint 보간(interpolation)
+        def interpolate_waypoints(waypoints, step=0.2):
+            interpolated = [waypoints[0]]
+            for i in range(len(waypoints)-1):
+                start = waypoints[i]
+                end = waypoints[i+1]
+                dist = math.hypot(end[0]-start[0], end[1]-start[1])
+                num_steps = max(1, int(dist / step))
+                for j in range(1, num_steps+1):
+                    x = start[0] + (end[0]-start[0]) * j / num_steps
+                    y = start[1] + (end[1]-start[1]) * j / num_steps
+                    interpolated.append((x, y))
+            return interpolated
+
+        waypoints = interpolate_waypoints(waypoints, step=0.2)
+        return waypoints
+
