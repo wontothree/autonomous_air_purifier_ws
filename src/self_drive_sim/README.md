@@ -30,7 +30,7 @@
     │   │
     │   ├── actor_collision.py       # 동적 오브젝트 작동 코드
     │   ├── debug.py                 # 키보드 조종 사이클 실행 코드
-    │   ├── test.py                  # 테스트 사이클 실행 코드
+    │   ├── test.py                  # 테스트 사이클 실행 코드      *****
     │   └── train.py                 # 훈련 사이클 실행 코드
     │
     ├── test
@@ -57,10 +57,21 @@ source install/setup.bash
 ```
 
 ```bash
+ros2 launch self_drive_sim debug_launch_map0.py
+ros2 launch self_drive_sim debug_launch_map1.py
+ros2 launch self_drive_sim debug_launch_map2.py
+ros2 launch self_drive_sim debug_launch_map3.py
+
 ros2 launch self_drive_sim train_launch_map0.py
 ros2 launch self_drive_sim train_launch_map1.py
 ros2 launch self_drive_sim train_launch_map2.py
 ros2 launch self_drive_sim train_launch_map3.py
+
+ros2 launch self_drive_sim test_launch_map0.py
+ros2 launch self_drive_sim test_launch_map1.py
+ros2 launch self_drive_sim test_launch_map2.py
+ros2 launch self_drive_sim test_launch_map3.py
+ros2 launch self_drive_sim test_launch_all.py
 ```
 
 [http://localhost:8080/vnc.html](http://localhost:8080/vnc.html)

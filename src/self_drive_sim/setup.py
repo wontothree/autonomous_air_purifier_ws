@@ -30,7 +30,7 @@ setup(
             f"test = {package_name}.test:main",
             f"debug = {package_name}.debug:main",
             # custom node
-            'rmc_localizer_node = self_drive_sim.agent.agent:main'
+            'agent_node = self_drive_sim.agent.agent:main'
         ],
     },
 )
