@@ -31,7 +31,6 @@ setup(
             f"debug = {package_name}.debug:main",
             # custom node
             'rmc_localizer_node = self_drive_sim.agent.agent:main'
-            'rmc_localizer_node = self_drive_sim.agent.agent:main'
         ],
     },
 )

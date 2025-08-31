@@ -280,7 +280,7 @@ class RMCLocalizer:
 
 
 # ----------------------------------------------------------------------------------------------------
-
+from geometry_msgs.msg import PoseStamped
 class RMCLocalizerROS(Node):
     def __init__(self, rmclocalizer,
                  initialpose_sub_topic_name='/initialpose',
@@ -338,14 +338,31 @@ class RMCLocalizerROS(Node):
             10
         )
 
+        self.pose_publisher = self.create_publisher(
+            PoseStamped,
+            '/robot_pose_stamped',
+            10)
+
     def callback_timer(self):
         # step 2
-        self._rmclocalizer.update_pose_by_motion_model()  
+        # self._rmclocalizer.update_pose_by_motion_model()
 
-        if hasattr(self._rmclocalizer, 'particle_set'):
-            self.publish_particles(self._rmclocalizer.particle_set)
+        # if hasattr(self._rmclocalizer, 'particle_set'):
+        #     self.publish_particles(self._rmclocalizer.particle_set)
         
-        self.publish_scan()
+        # self.publish_scan()
+
+        # test
+        # Info 타입의 객체(딕셔너리) 생성
+        info_data: Info = {
+            'robot_position': (10.5, 25.1),
+            'robot_angle': 1.57,
+            'collided': False,
+            'all_pollution': np.array([0.2, 0.5, 0.1])
+        }
+
+        # robot_position 값 출력
+        # print(info_data['robot_position'])
 
     def callback_initialpose(self, msg: PoseWithCovarianceStamped):
         # extract yaw from quaternion
@@ -427,6 +444,60 @@ class RMCLocalizerROS(Node):
         )
 
         self._prev_time = curr_time
+
+        # test
+        """
+        Odometry 메시지를 수신했을 때 호출되는 콜백 함수
+        """
+        # 1. Odometry 메시지에서 x, y 위치 추출
+        x_pos = msg.pose.pose.position.x
+        y_pos = msg.pose.pose.position.y
+
+        # 2. Odometry 메시지의 Quaternion 방향 정보에서 yaw 각도 추출
+        orientation_q = msg.pose.pose.orientation
+        (roll, pitch, yaw) = self.euler_from_quaternion(orientation_q)
+
+        # 터미널에 현재 위치와 방향(yaw) 출력 (선택 사항)
+        self.get_logger().info(f'Received Odom: x={x_pos:.2f}, y={y_pos:.2f}, yaw={math.degrees(yaw):.2f}°')
+
+        # 3. RViz 시각화를 위한 PoseStamped 메시지 생성 및 발행
+        pose_stamped_msg = PoseStamped()
+        
+        # header 정보는 수신한 odom 메시지의 것을 그대로 사용 (frame_id와 timestamp 일치)
+        pose_stamped_msg.header = msg.header
+        
+        # pose 정보도 odom 메시지의 것을 그대로 복사
+        # (x, y, z 위치와 quaternion 방향 정보가 모두 포함됨)
+        pose_stamped_msg.pose = msg.pose.pose
+        
+        self.pose_publisher.publish(pose_stamped_msg)
+
+    def euler_from_quaternion(self, quaternion):
+        """
+        Quaternion 메시지로부터 Roll, Pitch, Yaw 각도를 계산하는 함수
+        """
+        x = quaternion.x
+        y = quaternion.y
+        z = quaternion.z
+        w = quaternion.w
+
+        # Roll (x-axis rotation)
+        t0 = +2.0 * (w * x + y * z)
+        t1 = +1.0 - 2.0 * (x * x + y * y)
+        roll_x = math.atan2(t0, t1)
+
+        # Pitch (y-axis rotation)
+        t2 = +2.0 * (w * y - z * x)
+        t2 = +1.0 if t2 > +1.0 else t2
+        t2 = -1.0 if t2 < -1.0 else t2
+        pitch_y = math.asin(t2)
+
+        # Yaw (z-axis rotation)
+        t3 = +2.0 * (w * z + x * y)
+        t4 = +1.0 - 2.0 * (y * y + z * z)
+        yaw_z = math.atan2(t3, t4)
+
+        return roll_x, pitch_y, yaw_z
     
     def callback_scan(self, front_scan_msg: LaserScan):
         self.scan = front_scan_msg
