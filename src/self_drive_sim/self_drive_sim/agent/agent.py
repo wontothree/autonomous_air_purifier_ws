@@ -64,7 +64,7 @@ class Agent:
         # self.log(f"Number of Rooms: {map_info.num_rooms}")
         # self.log(f"Room Names: {map_info.room_names}")
         # self.log(f"Station Position (World Coords): {map_info.station_pos}")
-        # self.log(f"Robot Starting Position: {map_info.starting_pos}")
+        self.log(f"Robot Starting Position: {map_info.starting_pos}")
         # self.log(f"Robot Starting Angle: {map_info.starting_angle} radians")
         # self.log(f"Last Pollution End Time: {map_info.pollution_end_time} s")
         # self.log(f"Wall Grid Shape: {map_info.wall_grid.shape}")
@@ -353,16 +353,14 @@ class Agent:
 
 
 
-
-# -----
-
-def print_global_map(map_path, step=5):
+# ----------------------------------------------------------------------------------------------------
+def print_global_map(map_path, is_coordinate=True, step=5):
     """
     주어진 FloorMap 파일을 읽고, 터미널용 맵을 출력합니다.
     - 벽: '#'
     - 빈 공간: '.'
     - 방 ID: 0-9, 10-15 -> A-F (16진수)
-    - 스테이션: 'S'
+    - 스테이션: 'D'
     - 좌표계: 상단(y), 좌측(x) 5단위 표시
 
     using method ---
@@ -378,9 +376,9 @@ def print_global_map(map_path, step=5):
 
     # Generate Mapinfo
     pollution_end_time = 10.0
-    starting_pos = floor_map.station_pos
+    station_pos = floor_map.station_pos
     starting_angle = 0.0
-    map_info = floor_map.to_map_info(pollution_end_time, starting_pos, starting_angle)
+    map_info = floor_map.to_map_info(pollution_end_time, station_pos, starting_angle)
 
     wall_grid = map_info.wall_grid
     station_pos = map_info.station_pos
@@ -403,7 +401,7 @@ def print_global_map(map_path, step=5):
         char = room_id_to_char(room_id)
         for x, y in cells:
             # 벽이나 스테이션이 아니면 덮어쓰기
-            if grid_display[x, y] not in ('#', 'S'):
+            if grid_display[x, y] not in ('#', 'D', 'O', 'S'):
                 grid_display[x, y] = char
 
     # Station
@@ -411,45 +409,63 @@ def print_global_map(map_path, step=5):
     row = int(gx)
     col = int(gy)
     if 0 <= row < height and 0 <= col < width:
-        grid_display[row, col] = 'S'
+        grid_display[row, col] = 'D'
+
+    # Origin (grid 좌표 그대로 사용)
+    # ox, oy = map_info.grid_origin
+    # ox, oy = int(ox), int(oy)
+    # if 0 <= ox < height and 0 <= oy < width:
+    #     grid_display[ox, oy] = 'O'
+
+    # Starting position (world → grid 변환 필요)
+    if (map_info.height == 30 and map_info.width == 40):    # Map0
+        sx, sy = map_info.pos2grid((2.0, 0.0))
+    elif (map_info.height == 50 and map_info.width == 50):  # Map1
+        sx, sy = map_info.pos2grid((0.0, -2.0))
+    elif (map_info.height == 75 and map_info.width == 75):  # Map2
+        sx, sy = map_info.pos2grid((3.0, 3.0))
+    elif (map_info.height == 80 and map_info.width == 100): # Map3
+        sx, sy = map_info.pos2grid((-7.2, 5.0))
+    sx, sy = int(sx), int(sy)
+    if 0 <= sx < height and 0 <= sy < width:
+        grid_display[sx, sy] = 'S'
 
     # Print
-    is_coordinate = True
-
     if is_coordinate: # Map with coordinate
-        x_label_width = 3
-        y_labels = " _|"
+        y_labels = "  _|"
 
+        # Y
         for j in range(0, width, step):
-            label = f"{j:<{step-1}}|"
+            label = f"{int(j-width/2):<{step-1}}|"
             y_labels += label
+        y_labels += 'Y'
         print(y_labels)
 
         # X
-        for i in range(height):
-            if i % step == 0:
-                x_label = f"{i:>2} "
-            elif (i + 1) % step == 0:
-                x_label = " _ "
-            else:
-                x_label = "   "
+        x_center = height // 2
 
-            line = x_label + ''.join(grid_display[i, :])
+        for i in range(height):
+            x_val = i - x_center
+
+            # x축 레이블: 숫자만, 공백 없음
+            if i % step == 0:
+                x_label = f"{x_val:>3} "  # 3칸 폭 안에서 숫자 정렬
+            elif (i + 1) % step == 0:
+                x_label = "  _ "          # 구분선 3칸
+            else:
+                x_label = "    "          # 나머지 공백 3칸
+
+            map_row = ''.join(grid_display[i, :])
+            line = x_label + map_row
             print(line)
+        print('  X')
+
             
     else: # Map without coordinate
         for i in range(height):
             line = ''.join(grid_display[i, :])
             print(line)
 
-    print(map_file.starting_pos)
-
-
-# ----------------------------------------------------------------------------------------------------
-
-
 if __name__ == '__main__':
-    map_file = './../../worlds/map2.npz'
-    print_global_map(map_file, step=5)
-
-    # main()
+    map_file = './../../worlds/map3.npz'
+    print_global_map(map_file, is_coordinate=False, step=5)
