@@ -1,32 +1,17 @@
 from self_drive_sim.agent.interfaces import Observation, Info, MapInfo
 
-from self_drive_sim.simulation.floor_map import FloorMap
-
-import math
 import numpy as np
-import os
+import math
+import itertools
 
 class Agent:
     def __init__(self, logger):
         self.logger = logger
         self.steps = 0
 
-        self.map_info = None
         self.current_robot_pose = (0.0, 0.0, 0.0)
-        #self.pollution_state = (0.0, 0.0)
-        self.target_position = None
-        self.room_centers = []
-        self.pollution_end_time = 0.0
 
-        # Mission planning
-        self.polluted_rooms_queue = []      # 처리해야 할 오염된 방의 대기열
-        self.previous_pollution_data = None # 이전 스텝의 오염도
-        self.CLEAN_THRESHOLD = 0.1        # 청정 완료 기준
-
-        # Finite state machine
-        self.state = 'IDLE' # 'IDLE', 'NAVIGATING', 'CLEANING', 'DONE'
-
-        self.clean_start_time = None
+        self.current_wp_index = 0   # <-- 멤버 변수로 이동
 
     def initialize_map(self, map_info: MapInfo):
         """
@@ -55,44 +40,13 @@ class Agent:
         pos2grid: (pos) -> (grid_x, grid_y), 실제 world 좌표를 격자 좌표로 변환하는 함수
         ---
         """
-
-        # # --- 여기에 맵 정보 출력 코드를 추가합니다 ---
-        # self.log("================ MAP INFO (from Agent) ================")
-        # self.log(f"Map Dimensions (Height x Width): {map_info.height} x {map_info.width} grids")
-        # self.log(f"Grid Size: {map_info.grid_size} m")
-        # self.log(f"Grid Origin (in grid coords): {map_info.grid_origin}")
-        # self.log(f"Number of Rooms: {map_info.num_rooms}")
-        # self.log(f"Room Names: {map_info.room_names}")
-        # self.log(f"Station Position (World Coords): {map_info.station_pos}")
-        self.log(f"Robot Starting Position: {map_info.starting_pos}")
-        # self.log(f"Robot Starting Angle: {map_info.starting_angle} radians")
-        # self.log(f"Last Pollution End Time: {map_info.pollution_end_time} s")
-        # self.log(f"Wall Grid Shape: {map_info.wall_grid.shape}")
-        # self.log(f"Room Grid Shape: {map_info.room_grid.shape}")
-        # self.log("======================================================")
-        # # ---------------------------------------------
-
         self.map_info = map_info
         self.pollution_end_time = map_info.pollution_end_time
-        self.target_position = None
-        self.state = 'IDLE'
-        self.previous_pollution_data = np.zeros(self.map_info.num_rooms)
-        
-        # initialize robot pose
-        start_pos = map_info.starting_pos
-        start_angle = map_info.starting_angle
-        self.current_robot_pose = (start_pos[0], start_pos[1], start_angle)
-        
-        # Center world coordinate of every rooms
-        self.room_centers = []
-        for room_id in range(self.map_info.num_rooms):
-            cells = self.map_info.get_cells_in_room(room_id)
-            if not cells:
-                self.room_centers.append(self.map_info.station_pos)
-                continue
-            center_grid = (sum(c[0] for c in cells) / len(cells), sum(c[1] for c in cells) / len(cells))
-            self.room_centers.append(self.map_info.grid2pos(center_grid))
-        # self.log(f"Calculated Room Centers (World Coords): {self.room_centers}")
+
+        # Initialize robot pose
+        initial_robot_position = map_info.starting_pos
+        initial_robot_yaw = map_info.starting_angle
+        self.current_robot_pose = (initial_robot_position[0], initial_robot_position[1], initial_robot_yaw)
 
     def act(self, observation: Observation):
         """
@@ -117,84 +71,24 @@ class Agent:
         MODE가 0인 경우: 이동 명령, Twist 컨트롤로 선속도(LINEAR) 및 각속도(ANGULAR) 조절. 최대값 1m/s, 2rad/s
         MODE가 1인 경우: 청정 명령, 제자리에서 공기를 청정. LINEAR, ANGULAR는 무시됨. 청정 명령을 유지한 후 1초가 지나야 실제로 청정이 시작됨
         """
+        # action = (0, 0.5, 1.0)
 
-        robot_pollution = observation['sensor_pollution']
-        current_time = self.steps * 0.1
+        air_sensor_pollution_data = observation['air_sensor_pollution']
+        robot_sensor_pollution_data =  observation['sensor_pollution']
+        optimal_visit_order = self.mission_planner(air_sensor_pollution_data, robot_sensor_pollution_data, 2)
 
-        # air_sensor_pollution 없으면 이전 action 유지
-        if observation['air_sensor_pollution'] is None:
-            self.steps += 1
-            if self.state == 'NAVIGATING' and self.target_position:
-                return self.go_to_goal(self.current_robot_pose, self.target_position)
-            return (0, 0.0, 0.0)
+        if optimal_visit_order != None:
+            # waypoints = self.global_planner(2, optimal_visit_order[0])
+            waypoints = self.global_planner(2, 0)
 
-        # 1. 새로운 오염 발생 감지 및 polluted_rooms_queue 업데이트
-        current_pollution_data = observation['air_sensor_pollution']
-        self.mission_planner(current_pollution_data)
-
-        action = (0, 0.0, 0.0)
-
-        # -------------------
-        # FSM + Waypoint Logic
-        # -------------------
-
-        # IDLE 상태
-        if self.state == 'IDLE':
-            if self.polluted_rooms_queue:  # 오염된 방 탐지 시 이동
-                target_room_id = self.polluted_rooms_queue[0]
-                self.target_position = self.room_centers[target_room_id]
-                self.waypoints = self.global_planner(self.current_robot_pose[:2], self.target_position)
-                self.current_waypoint_idx = 1
-                self.state = 'NAVIGATING'
-                self.log(f"Navigating to Room {target_room_id} via {self.waypoints}")
-            elif current_time >= self.pollution_end_time:  # 오염원 끝나면 도킹
-                self.target_position = self.map_info.station_pos
-                self.waypoints = self.global_planner(self.current_robot_pose[:2], self.target_position)
-                self.current_waypoint_idx = 1
-                self.state = 'NAVIGATING'
-                self.log("Returning to station via waypoints.")
-
-        # NAVIGATING 상태
-        elif self.state == 'NAVIGATING':
-            if self.current_waypoint_idx < len(self.waypoints):
-                goal_wp = self.waypoints[self.current_waypoint_idx]
-                action = self.go_to_goal(self.current_robot_pose, goal_wp)
-                mode, _, _ = action
-                if mode == 1:  # waypoint 도착
-                    self.current_waypoint_idx += 1
-            else:
-                # 모든 waypoint 도착
-                action = self.go_to_goal(self.current_robot_pose, self.target_position)
-                mode, _, _ = action
-                if mode == 1:
-                    if self.target_position == self.map_info.station_pos:
-                        self.state = 'DONE'
-                        self.log("Reached station. Task DONE.")
-                    else:
-                        self.state = 'CLEANING'
-                        self.clean_start_time = current_time
-                        self.current_cleaning_room_id = self.polluted_rooms_queue[0]  # 현재 청소 방 저장
-                        self.log(f"Start cleaning at {self.target_position}")
-
-        # CLEANING 상태
-        elif self.state == 'CLEANING':
-            action = (1, 0.0, 0.0)
-            target_room_id = self.current_cleaning_room_id
-
-            if target_room_id is not None and observation['air_sensor_pollution'] is not None:
-                room_pollution = observation['air_sensor_pollution'][target_room_id]
-                if room_pollution < self.CLEAN_THRESHOLD:
-                    self.log(f"Cleaning complete for target {self.target_position}.")
-                    self.polluted_rooms_queue.pop(0)
-                    self.state = 'IDLE'
-                    self.target_position = None
-                    self.waypoints = []
-                    self.current_waypoint_idx = 0
-                    self.current_cleaning_room_id = None
-
-        # DONE 상태
-        elif self.state == 'DONE':
-            action = (0, 0.0, 0.0)
+            linear_action, self.current_wp_index = self.follow_waypoints(
+                self.current_robot_pose,
+                waypoints,
+                self.current_wp_index
+            )
+            action = linear_action
+        else:
+            action = (0, 0, 0)
 
         self.steps += 1
         return action
@@ -223,12 +117,8 @@ class Agent:
         all_pollution: np.ndarray, 거치형 에어 센서가 없는 방까지 포함한 오염도 정보
         ---
         """
-
         self.current_robot_pose = (info["robot_position"][0], info["robot_position"][1], info["robot_angle"])
-        #self.pollution_state = info['all_pollution']
-
-        #self.log(f"Robot pose: {self.current_robot_pose}")
-        #self.log(f"Pollution State {self.pollution_state}")
+        # self.log(self.current_robot_pose)
 
     def reset(self):
         """
@@ -244,7 +134,95 @@ class Agent:
         """
         self.logger(str(msg))
 
-    # additional functions
+    def mission_planner(self, air_sensor_pollution_data, robot_sensor_pollution_data, current_node):
+        """
+        미션 플래너: 오염 감지된 방들을 기반으로 TSP 순서에 따라 task queue 생성
+
+        Parameters:
+            - air_sensor_pollution_data: list of float, 각 방의 공기 센서 오염 수치
+            - robot_sensor_pollution_data: list of float, 로봇 센서 오염 수치 (현재 사용 안 함)
+            - current_node: int, 현재 방(room)의 ID
+
+        Return:
+            - best_path: List[int], 방문해야 할 방의 순서
+        """
+        map0_distance_matrix = np.array([
+            [0, 29, 12, 43],
+            [29, 0, 33, 27],
+            [12, 33, 0, 15],
+            [43, 27, 15, 0]
+        ])
+
+        unobserved_potential_regions = []
+
+        # Polluted regions
+        observed_polluted_regions = [
+            room_id for room_id in range(self.map_info.num_rooms)
+            if air_sensor_pollution_data[room_id] > 0
+        ]
+
+        if not observed_polluted_regions:
+            return
+
+        distance_matrix = map0_distance_matrix  
+        dock_station_id = distance_matrix.shape[0] - 1  # 마지막 인덱스가 도킹 스테이션
+
+        min_cost = float('inf')
+        optimal_visit_order = []
+
+        # Calculate cost for every cases
+        for perm in itertools.permutations(observed_polluted_regions):
+            total_cost = 0
+            last_visited = current_node
+
+            for room_id in perm:
+                total_cost += distance_matrix[last_visited][room_id]
+                last_visited = room_id
+
+            # Add Cost for last_visited to docking station
+            total_cost += distance_matrix[last_visited][dock_station_id]
+
+            if total_cost < min_cost:
+                min_cost = total_cost
+                optimal_visit_order = list(perm)
+
+        self.log(optimal_visit_order)
+
+        return optimal_visit_order
+
+    def global_planner(self, start_node, end_node):
+
+        map0_reference_waypoint = np.empty((4, 4), dtype=object)
+        for i in range(4):
+            for j in range(4):
+                map0_reference_waypoint[i, j] = []
+        map0_reference_waypoint[1][0] = np.array([
+            (-8.0, -10.0), (-8.0, -9.5), (-7.9, -9.0), (-7.8, -8.5), (-7.6, -8.0), (-7.5, -7.6), (-7.4, -7.1), (-7.3, -6.6), (-7.1, -6.1), (-7.0, -5.6), (-6.9, -5.1), (-6.8, -4.7), (-6.6, -4.2), (-6.5, -3.7), (-6.4, -3.2), (-6.3, -2.7), (-6.1, -2.2), (-6.0, -1.7), (-5.9, -1.3), (-5.8, -0.8), (-5.6, -0.3), (-5.5, 0.2), (-5.4, 0.7), (-5.3, 1.2), (-5.2, 1.6), (-5.0, 2.1), (-4.9, 2.6), (-4.9, 3.1), (-4.8, 3.6), (-4.7, 4.1), (-4.5, 4.6), (-4.4, 5.0), (-4.3, 5.5), (-4.0, 6.0), (-3.7, 6.3), (-3.3, 6.6), (-2.8, 6.8), (-2.3, 6.9), (-1.9, 7.1), (-1.4, 7.2), (-0.9, 7.4), (-0.4, 7.6), (0.0, 7.7), (0.5, 7.9), (1.0, 8.0), (1.4, 8.3), (1.8, 8.6), (2.2, 8.8), (2.7, 9.1), (3.1, 9.4)
+        ])
+        map0_reference_waypoint[0][1] = map0_reference_waypoint[1][0][::-1]
+
+        # v
+        map0_reference_waypoint[2][0] = np.array([
+            (1.8, 0.0), (1.8, 0.1), (1.78, 0.2), (1.74, 0.3), (1.68, 0.38), (1.62, 0.46), (1.58, 0.54), (1.52, 0.62), (1.46, 0.7), (1.4, 0.78), (1.34, 0.86), (1.3, 0.96), (1.26, 1.06), (1.22, 1.14), (1.2, 1.24), (1.16, 1.32), (1.12, 1.42), (1.08, 1.52), (1.04, 1.6), (1.0, 1.7), (0.98, 1.8)
+        ])
+        map0_reference_waypoint[0][2] = map0_reference_waypoint[2][0][::-1]
+
+        map0_reference_waypoint[2][1] = np.array([
+            (9.0, 0.0), (9.0, 0.5), (8.9, 1.0), (8.6, 1.4), (8.3, 1.8), (7.9, 2.1), (7.4, 2.2), (6.9, 2.4), (6.5, 2.5), (6.0, 2.7), (5.5, 2.8), (5.0, 3.0), (4.6, 3.2), (4.1, 3.4), (3.7, 3.7), (3.3, 4.0), (2.9, 4.2), (2.4, 4.5), (2.1, 4.9), (1.7, 5.1), (1.2, 5.3), (0.8, 5.6), (0.4, 5.8), (-0.1, 6.0), (-0.6, 6.0), (-1.1, 6.1), (-1.6, 6.1), (-2.1, 6.0), (-2.6, 6.1), (-3.1, 6.1), (-3.6, 6.0), (-4.0, 5.8), (-4.4, 5.5), (-4.7, 5.1), (-4.9, 4.6), (-5.0, 4.1), (-5.1, 3.6), (-5.1, 3.1), (-5.2, 2.6), (-5.3, 2.1), (-5.3, 1.6), (-5.4, 1.2), (-5.5, 0.7), (-5.5, 0.2), (-5.6, -0.3), (-5.7, -0.8), (-5.8, -1.3), (-5.8, -1.8), (-5.9, -2.3), (-6.0, -2.8), (-6.0, -3.3), (-6.2, -3.8), (-6.4, -4.2), (-6.6, -4.7), (-6.8, -5.1), (-7.0, -5.6), (-7.2, -6.1), (-7.4, -6.5), (-7.6, -7.0), (-7.8, -7.5), (-8.0, -7.9), (-8.1, -8.4), (-8.3, -8.8), (-8.6, -9.2)
+        ])
+        map0_reference_waypoint[1][2] = map0_reference_waypoint[2][1][::-1]
+
+        map0_reference_waypoint[3][0] = np.array([
+            (6.0, -15.0), (6.0, -14.5), (5.9, -14.0), (5.8, -13.5), (5.6, -13.0), (5.5, -12.6), (5.4, -12.1), (5.3, -11.6), (5.1, -11.1), (5.0, -10.6), (4.9, -10.1), (4.8, -9.7), (4.6, -9.2), (4.6, -8.7), (4.6, -8.2), (4.6, -7.7), (4.6, -7.2), (4.6, -6.7), (4.6, -6.2), (4.6, -5.7), (4.6, -5.2), (4.6, -4.7), (4.6, -4.2), (4.6, -3.7), (4.6, -3.2), (4.6, -2.7), (4.6, -2.2), (4.6, -1.7), (4.6, -1.2), (4.6, -0.7), (4.6, -0.2), (4.6, 0.3), (4.6, 0.8), (4.6, 1.3), (4.6, 1.8), (4.6, 2.3), (4.6, 2.8), (4.6, 3.3), (4.6, 3.8), (4.6, 4.3), (4.6, 4.8), (4.6, 5.3), (4.6, 5.8), (4.6, 6.3), (4.6, 6.8), (4.6, 7.3), (4.6, 7.8), (4.6, 8.3)
+        ])
+        map0_reference_waypoint[0][3] = map0_reference_waypoint[3][0][::-1]
+
+        map0_reference_waypoint[3][1] = np.array([
+            (6.0, -15.0), (6.0, -14.5), (5.9, -14.0), (5.6, -13.6), (5.5, -13.1), (5.4, -12.6), (5.3, -12.1), (5.1, -11.6), (5.0, -11.2), (4.9, -10.7), (4.8, -10.2), (4.6, -9.7), (4.5, -9.2), (4.4, -8.7), (4.3, -8.2), (4.2, -7.8), (4.0, -7.3), (3.9, -6.8), (3.9, -6.3), (3.9, -5.8), (3.9, -5.3), (3.8, -4.8), (3.5, -4.4), (3.4, -3.9), (3.2, -3.4), (3.1, -3.0), (2.9, -2.5), (2.7, -2.0), (2.6, -1.6), (2.4, -1.1), (2.3, -0.6), (2.1, -0.1), (2.0, 0.3), (1.8, 0.8), (1.6, 1.3), (1.5, 1.7), (1.3, 2.2), (1.2, 2.7), (1.2, 3.2), (1.2, 3.7), (1.2, 4.2), (1.1, 4.7), (0.9, 5.1), (0.5, 5.5), (0.1, 5.8), (-0.3, 6.0), (-0.8, 6.2), (-1.3, 6.2), (-1.8, 6.3), (-2.3, 6.3), (-2.8, 6.3), (-3.3, 6.3), (-3.7, 6.0), (-4.1, 5.7), (-4.4, 5.3), (-4.6, 4.9), (-4.7, 4.4), (-4.8, 3.9), (-4.8, 3.4), (-4.9, 2.9), (-5.0, 2.4), (-5.0, 1.9), (-5.1, 1.4), (-5.2, 0.9), (-5.3, 0.4), (-5.3, -0.1), (-5.4, -0.6), (-5.5, -1.1), (-5.5, -1.6), (-5.6, -2.1), (-5.8, -2.5), (-6.0, -3.0), (-6.2, -3.4), (-6.4, -3.9), (-6.6, -4.4), (-6.8, -4.8), (-6.9, -5.3), (-7.1, -5.8), (-7.3, -6.2), (-7.5, -6.7), (-7.7, -7.1), (-7.9, -7.6), (-8.1, -8.1), (-8.3, -8.5), (-8.5, -9.0), (-8.8, -9.4)
+        ])
+        map0_reference_waypoint[1][3] = map0_reference_waypoint[3][1][::-1]
+
+        return map0_reference_waypoint[start_node][end_node]
 
     def go_to_goal(self, current_pose, target_pose):
         ANGLE_TOLERANCE = math.radians(5)
@@ -277,195 +255,35 @@ class Agent:
 
         linear_vel = np.clip(linear_vel, MIN_LINEAR_VEL, MAX_LINEAR_VEL)
         return (0, linear_vel, angular_vel)
-
-    def mission_planner(self, current_pollution_data):
+        
+    def follow_waypoints(self, current_pose, waypoints, wp_index):
         """
-        새로운 오염 발생 감지 및 polluted_rooms_queue 업데이트
+        여러 개의 waypoint를 순차적으로 따라가기 위한 함수.
 
-        사용 멤버 변수:
-            - self.map_info.num_rooms : 방 개수 확인
-            - self.CLEAN_THRESHOLD : 청정 기준 임계값
-            - self.log(msg) : 로그 출력
+        Args:
+            current_pose: (x, y, yaw) 현재 로봇 pose
+            waypoints: [(x1, y1), (x2, y2), ...] 따라가야 할 waypoint 리스트
+            wp_index: 현재 목표 waypoint 인덱스
 
-        변경 멤버 변수:
-            - self.polluted_rooms_queue : 새 오염이 발생한 방 ID를 추가
-            - self.previous_pollution_data : 현재 오염 데이터를 저장
+        Returns:
+            action: (MODE, linear_v, angular_v)
+            updated_wp_index: 다음 step에서 사용할 waypoint index
         """
-        for room_id in range(self.map_info.num_rooms):
-            prev = self.previous_pollution_data[room_id]
-            curr = current_pollution_data[room_id]
-            if prev < self.CLEAN_THRESHOLD and curr >= self.CLEAN_THRESHOLD:
-                if room_id not in self.polluted_rooms_queue:
-                    self.log(f"New pollution detected in Room {room_id}.")
-                    self.polluted_rooms_queue.append(room_id)
+        if wp_index >= len(waypoints):
+            # 모든 waypoint 다 도착
+            return (0, 0.0, 0.0), wp_index
 
-        # 현재 오염 상태를 다음 step을 위해 저장
-        self.previous_pollution_data = current_pollution_data
+        # 현재 목표 waypoint
+        target_wp = waypoints[wp_index]
 
+        # go_to_goal 사용
+        action = self.go_to_goal(current_pose, target_wp)
 
-    def global_planner(self, start_pos, goal_pos):
-        """
-        현재 위치와 목표 위치에 따라 장애물을 고려한 waypoint 리스트 반환.
-        직선 이동 가능한 구간은 직선으로 이동.
-        """
-        def is_close(pos1, pos2, tol=0.05):
-            return math.hypot(pos1[0] - pos2[0], pos1[1] - pos2[1]) < tol
+        # 도착했는지 확인
+        DISTANCE_TOLERANCE = 0.15
+        dist_error = math.hypot(target_wp[0] - current_pose[0], target_wp[1] - current_pose[1])
 
-        # 주요 지점 정의
-        start = (2, 0)
-        outside = (1.6, 2.4)
-        room = (-1.4, -2.4)
-        station = (1.4, 3)
+        if dist_error < DISTANCE_TOLERANCE:
+            wp_index += 1  # 다음 waypoint로 업데이트
 
-        # start → goal 경로에 필요한 중간 waypoint 결정
-        mid_waypoints = []
-
-        if (is_close(start_pos, start) and is_close(goal_pos, room)) or (is_close(start_pos, room) and is_close(goal_pos, start)):
-            mid_waypoints = [(-1.4, 2.4)]
-        elif (is_close(start_pos, room) and is_close(goal_pos, station)) or (is_close(start_pos, station) and is_close(goal_pos, room)):
-            mid_waypoints = [(1.4, 0), (-1.4, 2.4)]
-        elif (is_close(start_pos, outside) and is_close(goal_pos, room)) or (is_close(start_pos, room) and is_close(goal_pos, outside)):
-            mid_waypoints = [(-1.4, 2.4)]
-
-        # 나머지는 직선 이동
-        waypoints = [start_pos] + mid_waypoints + [goal_pos]
-
-        # -------------------------------------------
-        # waypoint 보간(interpolation)
-        def interpolate_waypoints(waypoints, step=0.2):
-            interpolated = [waypoints[0]]
-            for i in range(len(waypoints)-1):
-                start = waypoints[i]
-                end = waypoints[i+1]
-                dist = math.hypot(end[0]-start[0], end[1]-start[1])
-                num_steps = max(1, int(dist / step))
-                for j in range(1, num_steps+1):
-                    x = start[0] + (end[0]-start[0]) * j / num_steps
-                    y = start[1] + (end[1]-start[1]) * j / num_steps
-                    interpolated.append((x, y))
-            return interpolated
-
-        waypoints = interpolate_waypoints(waypoints, step=0.2)
-        return waypoints
-
-
-
-
-
-
-# ----------------------------------------------------------------------------------------------------
-def print_global_map(map_path, is_coordinate=True, step=5):
-    """
-    주어진 FloorMap 파일을 읽고, 터미널용 맵을 출력합니다.
-    - 벽: '#'
-    - 빈 공간: '.'
-    - 방 ID: 0-9, 10-15 -> A-F (16진수)
-    - 스테이션: 'D'
-    - 좌표계: 상단(y), 좌측(x) 5단위 표시
-
-    using method ---
-
-    map_file = './../../worlds/map2.npz'
-    print_global_map(map_file, step=5)
-
-    """
-    # Generate FloorMap
-    if not os.path.exists(map_path):
-        raise FileNotFoundError(f"Map file not found: {map_path}")
-    floor_map = FloorMap.from_file(map_path)
-
-    # Generate Mapinfo
-    pollution_end_time = 10.0
-    station_pos = floor_map.station_pos
-    starting_angle = 0.0
-    map_info = floor_map.to_map_info(pollution_end_time, station_pos, starting_angle)
-
-    wall_grid = map_info.wall_grid
-    station_pos = map_info.station_pos
-
-    height, width = wall_grid.shape
-    grid_display = np.full((height, width), '.', dtype=str)  # 빈 공간은 '.'
-
-    # 벽 표시
-    grid_display[wall_grid] = '#'
-
-    # Room ID (0-9, 10-15 -> A-F)
-    def room_id_to_char(room_id):
-        if room_id < 10:
-            return str(room_id)
-        else:
-            return chr(ord('A') + (room_id - 10) % 6)  # 10->A, 11->B ... 15->F, 16->A 반복
-
-    for room_id in range(map_info.num_rooms):
-        cells = map_info.get_cells_in_room(room_id)
-        char = room_id_to_char(room_id)
-        for x, y in cells:
-            # 벽이나 스테이션이 아니면 덮어쓰기
-            if grid_display[x, y] not in ('#', 'D', 'O', 'S'):
-                grid_display[x, y] = char
-
-    # Station
-    gx, gy = map_info.pos2grid(station_pos)
-    row = int(gx)
-    col = int(gy)
-    if 0 <= row < height and 0 <= col < width:
-        grid_display[row, col] = 'D'
-
-    # Origin (grid 좌표 그대로 사용)
-    # ox, oy = map_info.grid_origin
-    # ox, oy = int(ox), int(oy)
-    # if 0 <= ox < height and 0 <= oy < width:
-    #     grid_display[ox, oy] = 'O'
-
-    # Starting position (world → grid 변환 필요)
-    if (map_info.height == 30 and map_info.width == 40):    # Map0
-        sx, sy = map_info.pos2grid((2.0, 0.0))
-    elif (map_info.height == 50 and map_info.width == 50):  # Map1
-        sx, sy = map_info.pos2grid((0.0, -2.0))
-    elif (map_info.height == 75 and map_info.width == 75):  # Map2
-        sx, sy = map_info.pos2grid((3.0, 3.0))
-    elif (map_info.height == 80 and map_info.width == 100): # Map3
-        sx, sy = map_info.pos2grid((-7.2, 5.0))
-    sx, sy = int(sx), int(sy)
-    if 0 <= sx < height and 0 <= sy < width:
-        grid_display[sx, sy] = 'S'
-
-    # Print
-    if is_coordinate: # Map with coordinate
-        y_labels = "  _|"
-
-        # Y
-        for j in range(0, width, step):
-            label = f"{int(j-width/2):<{step-1}}|"
-            y_labels += label
-        y_labels += 'Y'
-        print(y_labels)
-
-        # X
-        x_center = height // 2
-
-        for i in range(height):
-            x_val = i - x_center
-
-            # x축 레이블: 숫자만, 공백 없음
-            if i % step == 0:
-                x_label = f"{x_val:>3} "  # 3칸 폭 안에서 숫자 정렬
-            elif (i + 1) % step == 0:
-                x_label = "  _ "          # 구분선 3칸
-            else:
-                x_label = "    "          # 나머지 공백 3칸
-
-            map_row = ''.join(grid_display[i, :])
-            line = x_label + map_row
-            print(line)
-        print('  X')
-
-            
-    else: # Map without coordinate
-        for i in range(height):
-            line = ''.join(grid_display[i, :])
-            print(line)
-
-if __name__ == '__main__':
-    map_file = './../../worlds/map3.npz'
-    print_global_map(map_file, is_coordinate=False, step=5)
+        return action, wp_index
