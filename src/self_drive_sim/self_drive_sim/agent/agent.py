@@ -1,7 +1,7 @@
 from self_drive_sim.agent.interfaces import Observation, Info, MapInfo
 
-import numpy as np
 import math
+import numpy as np
 import itertools
 
 class Agent:
@@ -11,7 +11,13 @@ class Agent:
 
         self.current_robot_pose = (0.0, 0.0, 0.0)
 
-        self.current_wp_index = 0   # <-- 멤버 변수로 이동
+        # Finite state machine
+        self.current_fsm_state = "WAITING"
+        self.waypoints = []
+        self.current_waypoint_index = 0
+        self.tmp_target_position = None
+        self.optimal_next_node_index = None
+        self.current_node_index = None
 
     def initialize_map(self, map_info: MapInfo):
         """
@@ -42,6 +48,7 @@ class Agent:
         """
         self.map_info = map_info
         self.pollution_end_time = map_info.pollution_end_time
+        self.get_room_id = map_info.get_room_id
 
         # Initialize robot pose
         initial_robot_position = map_info.starting_pos
@@ -71,26 +78,21 @@ class Agent:
         MODE가 0인 경우: 이동 명령, Twist 컨트롤로 선속도(LINEAR) 및 각속도(ANGULAR) 조절. 최대값 1m/s, 2rad/s
         MODE가 1인 경우: 청정 명령, 제자리에서 공기를 청정. LINEAR, ANGULAR는 무시됨. 청정 명령을 유지한 후 1초가 지나야 실제로 청정이 시작됨
         """
-        # action = (0, 0.5, 1.0)
-
+        # Mission planning
         air_sensor_pollution_data = observation['air_sensor_pollution']
         robot_sensor_pollution_data =  observation['sensor_pollution']
-        optimal_visit_order = self.mission_planner(air_sensor_pollution_data, robot_sensor_pollution_data, 2)
 
-        if optimal_visit_order != None:
-            # waypoints = self.global_planner(2, optimal_visit_order[0])
-            waypoints = self.global_planner(2, 0)
+        # --------------------------------------------------
+        next_state, action = self.fsm(
+            air_sensor_pollution_data,
+            robot_sensor_pollution_data,
+            self.current_fsm_state,
+            self.current_robot_pose
+        )
+        self.current_fsm_state = next_state 
+        # --------------------------------------------------
 
-            linear_action, self.current_wp_index = self.follow_waypoints(
-                self.current_robot_pose,
-                waypoints,
-                self.current_wp_index
-            )
-            action = linear_action
-        else:
-            action = (0, 0, 0)
-
-        self.steps += 1
+        self.steps += 1 
         return action
 
     def learn(
@@ -134,14 +136,14 @@ class Agent:
         """
         self.logger(str(msg))
 
-    def mission_planner(self, air_sensor_pollution_data, robot_sensor_pollution_data, current_node):
+    def mission_planner(self, air_sensor_pollution_data, robot_sensor_pollution_data, current_node_index):
         """
         미션 플래너: 오염 감지된 방들을 기반으로 TSP 순서에 따라 task queue 생성
 
         Parameters:
             - air_sensor_pollution_data: list of float, 각 방의 공기 센서 오염 수치
             - robot_sensor_pollution_data: list of float, 로봇 센서 오염 수치 (현재 사용 안 함)
-            - current_node: int, 현재 방(room)의 ID
+            - current_node_index: int, 현재 방(room)의 ID
 
         Return:
             - best_path: List[int], 방문해야 할 방의 순서
@@ -173,7 +175,7 @@ class Agent:
         # Calculate cost for every cases
         for perm in itertools.permutations(observed_polluted_regions):
             total_cost = 0
-            last_visited = current_node
+            last_visited = current_node_index
 
             for room_id in perm:
                 total_cost += distance_matrix[last_visited][room_id]
@@ -186,104 +188,168 @@ class Agent:
                 min_cost = total_cost
                 optimal_visit_order = list(perm)
 
-        self.log(optimal_visit_order)
+        # self.log(optimal_visit_order)
 
         return optimal_visit_order
-
-    def global_planner(self, start_node, end_node):
-
-        map0_reference_waypoint = np.empty((4, 4), dtype=object)
-        for i in range(4):
-            for j in range(4):
-                map0_reference_waypoint[i, j] = []
-        map0_reference_waypoint[1][0] = np.array([
-            (-8.0, -10.0), (-8.0, -9.5), (-7.9, -9.0), (-7.8, -8.5), (-7.6, -8.0), (-7.5, -7.6), (-7.4, -7.1), (-7.3, -6.6), (-7.1, -6.1), (-7.0, -5.6), (-6.9, -5.1), (-6.8, -4.7), (-6.6, -4.2), (-6.5, -3.7), (-6.4, -3.2), (-6.3, -2.7), (-6.1, -2.2), (-6.0, -1.7), (-5.9, -1.3), (-5.8, -0.8), (-5.6, -0.3), (-5.5, 0.2), (-5.4, 0.7), (-5.3, 1.2), (-5.2, 1.6), (-5.0, 2.1), (-4.9, 2.6), (-4.9, 3.1), (-4.8, 3.6), (-4.7, 4.1), (-4.5, 4.6), (-4.4, 5.0), (-4.3, 5.5), (-4.0, 6.0), (-3.7, 6.3), (-3.3, 6.6), (-2.8, 6.8), (-2.3, 6.9), (-1.9, 7.1), (-1.4, 7.2), (-0.9, 7.4), (-0.4, 7.6), (0.0, 7.7), (0.5, 7.9), (1.0, 8.0), (1.4, 8.3), (1.8, 8.6), (2.2, 8.8), (2.7, 9.1), (3.1, 9.4)
-        ])
-        map0_reference_waypoint[0][1] = map0_reference_waypoint[1][0][::-1]
-
-        # v
-        map0_reference_waypoint[2][0] = np.array([
-            (1.8, 0.0), (1.8, 0.1), (1.78, 0.2), (1.74, 0.3), (1.68, 0.38), (1.62, 0.46), (1.58, 0.54), (1.52, 0.62), (1.46, 0.7), (1.4, 0.78), (1.34, 0.86), (1.3, 0.96), (1.26, 1.06), (1.22, 1.14), (1.2, 1.24), (1.16, 1.32), (1.12, 1.42), (1.08, 1.52), (1.04, 1.6), (1.0, 1.7), (0.98, 1.8)
-        ])
-        map0_reference_waypoint[0][2] = map0_reference_waypoint[2][0][::-1]
-
-        map0_reference_waypoint[2][1] = np.array([
-            (9.0, 0.0), (9.0, 0.5), (8.9, 1.0), (8.6, 1.4), (8.3, 1.8), (7.9, 2.1), (7.4, 2.2), (6.9, 2.4), (6.5, 2.5), (6.0, 2.7), (5.5, 2.8), (5.0, 3.0), (4.6, 3.2), (4.1, 3.4), (3.7, 3.7), (3.3, 4.0), (2.9, 4.2), (2.4, 4.5), (2.1, 4.9), (1.7, 5.1), (1.2, 5.3), (0.8, 5.6), (0.4, 5.8), (-0.1, 6.0), (-0.6, 6.0), (-1.1, 6.1), (-1.6, 6.1), (-2.1, 6.0), (-2.6, 6.1), (-3.1, 6.1), (-3.6, 6.0), (-4.0, 5.8), (-4.4, 5.5), (-4.7, 5.1), (-4.9, 4.6), (-5.0, 4.1), (-5.1, 3.6), (-5.1, 3.1), (-5.2, 2.6), (-5.3, 2.1), (-5.3, 1.6), (-5.4, 1.2), (-5.5, 0.7), (-5.5, 0.2), (-5.6, -0.3), (-5.7, -0.8), (-5.8, -1.3), (-5.8, -1.8), (-5.9, -2.3), (-6.0, -2.8), (-6.0, -3.3), (-6.2, -3.8), (-6.4, -4.2), (-6.6, -4.7), (-6.8, -5.1), (-7.0, -5.6), (-7.2, -6.1), (-7.4, -6.5), (-7.6, -7.0), (-7.8, -7.5), (-8.0, -7.9), (-8.1, -8.4), (-8.3, -8.8), (-8.6, -9.2)
-        ])
-        map0_reference_waypoint[1][2] = map0_reference_waypoint[2][1][::-1]
-
-        map0_reference_waypoint[3][0] = np.array([
-            (6.0, -15.0), (6.0, -14.5), (5.9, -14.0), (5.8, -13.5), (5.6, -13.0), (5.5, -12.6), (5.4, -12.1), (5.3, -11.6), (5.1, -11.1), (5.0, -10.6), (4.9, -10.1), (4.8, -9.7), (4.6, -9.2), (4.6, -8.7), (4.6, -8.2), (4.6, -7.7), (4.6, -7.2), (4.6, -6.7), (4.6, -6.2), (4.6, -5.7), (4.6, -5.2), (4.6, -4.7), (4.6, -4.2), (4.6, -3.7), (4.6, -3.2), (4.6, -2.7), (4.6, -2.2), (4.6, -1.7), (4.6, -1.2), (4.6, -0.7), (4.6, -0.2), (4.6, 0.3), (4.6, 0.8), (4.6, 1.3), (4.6, 1.8), (4.6, 2.3), (4.6, 2.8), (4.6, 3.3), (4.6, 3.8), (4.6, 4.3), (4.6, 4.8), (4.6, 5.3), (4.6, 5.8), (4.6, 6.3), (4.6, 6.8), (4.6, 7.3), (4.6, 7.8), (4.6, 8.3)
-        ])
-        map0_reference_waypoint[0][3] = map0_reference_waypoint[3][0][::-1]
-
-        map0_reference_waypoint[3][1] = np.array([
-            (6.0, -15.0), (6.0, -14.5), (5.9, -14.0), (5.6, -13.6), (5.5, -13.1), (5.4, -12.6), (5.3, -12.1), (5.1, -11.6), (5.0, -11.2), (4.9, -10.7), (4.8, -10.2), (4.6, -9.7), (4.5, -9.2), (4.4, -8.7), (4.3, -8.2), (4.2, -7.8), (4.0, -7.3), (3.9, -6.8), (3.9, -6.3), (3.9, -5.8), (3.9, -5.3), (3.8, -4.8), (3.5, -4.4), (3.4, -3.9), (3.2, -3.4), (3.1, -3.0), (2.9, -2.5), (2.7, -2.0), (2.6, -1.6), (2.4, -1.1), (2.3, -0.6), (2.1, -0.1), (2.0, 0.3), (1.8, 0.8), (1.6, 1.3), (1.5, 1.7), (1.3, 2.2), (1.2, 2.7), (1.2, 3.2), (1.2, 3.7), (1.2, 4.2), (1.1, 4.7), (0.9, 5.1), (0.5, 5.5), (0.1, 5.8), (-0.3, 6.0), (-0.8, 6.2), (-1.3, 6.2), (-1.8, 6.3), (-2.3, 6.3), (-2.8, 6.3), (-3.3, 6.3), (-3.7, 6.0), (-4.1, 5.7), (-4.4, 5.3), (-4.6, 4.9), (-4.7, 4.4), (-4.8, 3.9), (-4.8, 3.4), (-4.9, 2.9), (-5.0, 2.4), (-5.0, 1.9), (-5.1, 1.4), (-5.2, 0.9), (-5.3, 0.4), (-5.3, -0.1), (-5.4, -0.6), (-5.5, -1.1), (-5.5, -1.6), (-5.6, -2.1), (-5.8, -2.5), (-6.0, -3.0), (-6.2, -3.4), (-6.4, -3.9), (-6.6, -4.4), (-6.8, -4.8), (-6.9, -5.3), (-7.1, -5.8), (-7.3, -6.2), (-7.5, -6.7), (-7.7, -7.1), (-7.9, -7.6), (-8.1, -8.1), (-8.3, -8.5), (-8.5, -9.0), (-8.8, -9.4)
-        ])
-        map0_reference_waypoint[1][3] = map0_reference_waypoint[3][1][::-1]
-
-        return map0_reference_waypoint[start_node][end_node]
-
-    def go_to_goal(self, current_pose, target_pose):
-        ANGLE_TOLERANCE = math.radians(5)
-        DISTANCE_TOLERANCE = 0.15
-        MAX_LINEAR_VEL = 0.8
-        MIN_LINEAR_VEL = 0.05
-        MAX_ANGULAR_VEL = 1.5
-        KP_ANGLE = 2.0
-        KP_DISTANCE = 1.0
-
-        cx, cy, cyaw = current_pose
-        tx, ty = target_pose
-
-        dist_error = math.hypot(tx - cx, ty - cy)
-        if dist_error < DISTANCE_TOLERANCE:
-            return (1, 0.0, 0.0)
-
-        angle_to_target = math.atan2(ty - cy, tx - cx)
-        angle_error = angle_to_target - cyaw
-        while angle_error > math.pi: angle_error -= 2 * math.pi
-        while angle_error < -math.pi: angle_error += 2 * math.pi
-
-        angular_vel = np.clip(KP_ANGLE * angle_error, -MAX_ANGULAR_VEL, MAX_ANGULAR_VEL)
-        linear_vel = KP_DISTANCE * dist_error
-
-        angle_error_deg = abs(math.degrees(angle_error))
-        if angle_error_deg > 30:
-            scaling_factor = max(0, 1 - (angle_error_deg - 30) / 60)
-            linear_vel *= scaling_factor
-
-        linear_vel = np.clip(linear_vel, MIN_LINEAR_VEL, MAX_LINEAR_VEL)
-        return (0, linear_vel, angular_vel)
+    
+    def global_planner(self, start_node_index, end_node_index):
+        """
+        Index rules
+        - index of region is a index of matrix
+        - last index is for docking station
+        - (last - 1) index is for start position
         
-    def follow_waypoints(self, current_pose, waypoints, wp_index):
+        reference_waypoint_matrix[i][j] : waypoints from i to j
         """
-        여러 개의 waypoint를 순차적으로 따라가기 위한 함수.
+        map0_reference_waypoint_matrix = [[[] for _ in range(4)] for _ in range(4)]
+        map0_reference_waypoint_matrix[0][1] = [(-1, 1), (-1, -2)]
+        map0_reference_waypoint_matrix[0][3] = [(1.4, -3)]
+        map0_reference_waypoint_matrix[1][0] = [(-1, 1.6), (1, 1.8)]
+        map0_reference_waypoint_matrix[1][3] = [(-0.8, 1.6), (0.2, 1.2), (1.4, -3)]
+        map0_reference_waypoint_matrix[2][0] = [(1, 1.8)]
+        map0_reference_waypoint_matrix[2][1] = [(0.2, 1.6), (-0.8, 1.6), (-1, -2)]
+        return map0_reference_waypoint_matrix[start_node_index][end_node_index]
 
-        Args:
-            current_pose: (x, y, yaw) 현재 로봇 pose
-            waypoints: [(x1, y1), (x2, y2), ...] 따라가야 할 waypoint 리스트
-            wp_index: 현재 목표 waypoint 인덱스
 
-        Returns:
-            action: (MODE, linear_v, angular_v)
-            updated_wp_index: 다음 step에서 사용할 waypoint index
+    def controller(self, current_robot_pose, target_position, 
+                linear_gain=1.0, angular_gain=2.0, 
+                max_linear=1.0, max_angular=1.0,
+                angle_threshold=0.1):
         """
-        if wp_index >= len(waypoints):
-            # 모든 waypoint 다 도착
-            return (0, 0.0, 0.0), wp_index
+        목표 방향을 먼저 향하도록 하고, 방향이 맞으면 직진.
+        """
+        x, y, theta = current_robot_pose
+        target_x, target_y = target_position
 
-        # 현재 목표 waypoint
-        target_wp = waypoints[wp_index]
+        dx = target_x - x
+        dy = target_y - y
+        distance = math.hypot(dx, dy)
+        target_angle = math.atan2(dy, dx)
 
-        # go_to_goal 사용
-        action = self.go_to_goal(current_pose, target_wp)
+        # 방향 오차
+        angle_error = target_angle - theta
+        angle_error = math.atan2(math.sin(angle_error), math.cos(angle_error))  # -pi ~ pi
 
-        # 도착했는지 확인
-        DISTANCE_TOLERANCE = 0.15
-        dist_error = math.hypot(target_wp[0] - current_pose[0], target_wp[1] - current_pose[1])
+        # 방향 우선 제어
+        if abs(angle_error) > angle_threshold:
+            linear_velocity = 0.0  # 먼저 회전
+            angular_velocity = max(-max_angular, min(max_angular, angular_gain * angle_error))
+        else:
+            linear_velocity = max(-max_linear, min(max_linear, linear_gain * distance))
+            angular_velocity = max(-max_angular, min(max_angular, angular_gain * angle_error))
 
-        if dist_error < DISTANCE_TOLERANCE:
-            wp_index += 1  # 다음 waypoint로 업데이트
+        return linear_velocity, angular_velocity
 
-        return action, wp_index
+
+
+
+    def fsm(self,
+            air_sensor_pollution_data,
+            robot_sensor_pollution_data,
+            current_fsm_state, 
+            current_robot_pose, 
+            ):
+        """
+        current_fsm_state -> next_fsm_state, action
+        """
+        # Define states of finite state machine
+        FSM_WAITING = "WAITING"
+        FSM_CLEANING = "CLEANING"
+        FSM_NAVIGATING = "NAVIGATING"
+        FSM_RETURNING = "RETURNING"
+
+        def calculate_distance_to_target_position(current_position, target_position):
+            """
+            Euclidean distance
+            """
+            dx = target_position[0] - current_position[0]
+            dy = target_position[1] - current_position[1]
+            distance = math.hypot(dx, dy)
+            return distance
+
+        def is_target_reached(current_position, target_position, threshold=0.05):
+            """
+            Decide if robot reached in target position by threshold
+            """
+            return calculate_distance_to_target_position(current_position, target_position) < threshold
+        
+        def are_no_polluted_rooms(air_sensor_pollution_data):
+            """
+            Decide if there are polluted rooms
+            """
+            return all(pollution <= 0 for pollution in air_sensor_pollution_data) # True: there are no polluted rooms
+
+        current_robot_position = current_robot_pose[0], current_robot_pose[1]
+
+        if current_fsm_state == FSM_WAITING:
+            # Mission planning
+            optimal_visit_order = self.mission_planner(air_sensor_pollution_data, robot_sensor_pollution_data, current_node_index=2)
+
+            if optimal_visit_order != None: # 목표 구역이 있음 (상태 전이)
+                next_fsm_state = FSM_NAVIGATING
+                self.optimal_next_node_index = optimal_visit_order[0]
+                self.waypoints = self.global_planner(start_node_index=2, end_node_index=self.optimal_next_node_index)
+                self.current_waypoint_index = 0
+                self.tmp_target_position = self.waypoints[0]
+            else:
+                next_fsm_state = FSM_WAITING
+
+            action = (0, 0, 0) # Stop
+
+        elif current_fsm_state == FSM_NAVIGATING:
+            if is_target_reached(current_robot_position, self.waypoints[-1]): # 목표 구역에 도달함 (상태 전이):
+                next_fsm_state = FSM_CLEANING
+                self.current_waypoint_index = 0
+                self.current_node_index = self.optimal_next_node_index
+            else:
+                next_fsm_state = FSM_NAVIGATING
+
+            # set next tempt target point 이 순서를 바꾸면 왜 문제가 생길까?
+            if is_target_reached(current_robot_position, self.tmp_target_position) and self.current_waypoint_index < len(self.waypoints) - 1:
+                self.current_waypoint_index += 1
+                self.tmp_target_position = self.waypoints[self.current_waypoint_index]
+
+            linear_velocity, angular_velocity = self.controller(current_robot_pose, self.tmp_target_position)
+            action = (0, linear_velocity, angular_velocity)
+
+        elif current_fsm_state == FSM_CLEANING:
+            # Mission planning
+            optimal_visit_order = self.mission_planner(air_sensor_pollution_data, robot_sensor_pollution_data, current_node_index=self.current_node_index)          
+
+            if are_no_polluted_rooms(air_sensor_pollution_data):     # 오염 구역이 없음 (상태 전이)
+                next_fsm_state = FSM_RETURNING
+
+                self.current_waypoint_index = 0
+                self.waypoints = self.global_planner(start_node_index=self.current_node_index, end_node_index=3)
+                self.tmp_target_position = self.waypoints[0]
+
+            elif air_sensor_pollution_data[self.optimal_next_node_index] == 0 and optimal_visit_order != None:       # 청정 완료함 (상태 전이)
+                next_fsm_state = FSM_NAVIGATING
+
+                # 꼭 이때 해야 할까?
+                self.optimal_next_node_index = optimal_visit_order[0]
+                self.log(self.current_node_index)
+                self.log(self.optimal_next_node_index)
+                self.waypoints = self.global_planner(start_node_index=self.current_node_index, end_node_index=self.optimal_next_node_index)
+                self.current_waypoint_index = 0
+                self.log(self.waypoints)
+                self.tmp_target_position = self.waypoints[0]  
+
+            else:
+                next_fsm_state = FSM_CLEANING
+            
+            action = (1, 0, 0) # Stop and clean
+
+        elif current_fsm_state == FSM_RETURNING:
+            next_fsm_state = FSM_RETURNING
+            
+            linear_velocity, angular_velocity = self.controller(current_robot_pose, self.tmp_target_position)
+            action = (0, linear_velocity, angular_velocity)
+
+            if is_target_reached(current_robot_position, self.tmp_target_position) and self.current_waypoint_index < len(self.waypoints) - 1:
+                self.current_waypoint_index += 1
+                self.tmp_target_position = self.waypoints[self.current_waypoint_index]
+
+        self.log(current_fsm_state)
+
+        return next_fsm_state, action
