@@ -95,9 +95,34 @@ class Agent:
             current_time,
             pollution_end_time,
             current_robot_pose,
-            self.current_fsm_state
+            self.current_fsm_state,
+            map_id=0
         )
         self.current_fsm_state = next_state 
+        # --------------------------------------------------
+
+        # --------------------------------------------------
+        # --------------------------------------------------
+        # ------- 여기만 테스트 하세요 아빠 -------------------
+        # --------------------------------------------------
+        # --------------------------------------------------
+        # Global planning
+        # waypoints = self.global_planner(5, 1, map_id=1) 
+        # self.target_position = waypoints[self.current_waypoint_index]
+
+        # linear_velocity, angular_velocity = self.controller(self.current_robot_pose, self.target_position)
+        # action = (0, linear_velocity, angular_velocity)
+
+        # # Distance between current position and target position
+        # distance_to_target_position = math.hypot(self.target_position[0] - self.current_robot_pose[0],
+        #                                         self.target_position[1] - self.current_robot_pose[1])
+        # if distance_to_target_position < 0.1 and self.current_waypoint_index < len(waypoints) - 1:
+        #     self.current_waypoint_index += 1
+        #     self.target_positionn = waypoints[self.current_waypoint_index]
+        # --------------------------------------------------
+        # --------------------------------------------------
+        # --------------------------------------------------
+        # --------------------------------------------------
         # --------------------------------------------------
 
         self.steps += 1 
@@ -147,7 +172,7 @@ class Agent:
     # ----------------------------------------------------------------------------------------------------
     # New defined functions
 
-    def mission_planner(self, air_sensor_pollution_data, robot_sensor_pollution_data, current_node_index):
+    def mission_planner(self, air_sensor_pollution_data, robot_sensor_pollution_data, current_node_index, map_id):
         """
         미션 플래너: 오염 감지된 방들을 기반으로 TSP 순서에 따라 task queue 생성
 
@@ -155,16 +180,30 @@ class Agent:
             - air_sensor_pollution_data: list of float, 각 방의 공기 센서 오염 수치
             - robot_sensor_pollution_data: list of float, 로봇 센서 오염 수치 (현재 사용 안 함)
             - current_node_index: int, 현재 방(room)의 ID
+            - map_id: 0, 1, 2, 3
 
         Return:
             - best_path: List[int], 방문해야 할 방의 순서
         """
-        map0_distance_matrix = np.array([
-            [0, 29, 12, 43],
-            [29, 0, 33, 27],
-            [12, 33, 0, 15],
-            [43, 27, 15, 0]
-        ])
+        distance_matrices = {
+            0: np.array([
+                [0, 29, 12, 43],
+                [29, 0, 33, 27],
+                [12, 33, 0, 15],
+                [43, 27, 15, 0]
+            ]),
+            1: np.array([
+                [0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0, 0],
+            ]),  
+            2: np.array([]),
+            3: np.array([]),
+        }
 
         unobserved_potential_regions = []
 
@@ -177,7 +216,7 @@ class Agent:
         if not observed_polluted_regions:
             return
 
-        distance_matrix = map0_distance_matrix  
+        distance_matrix = distance_matrices.get(map_id) 
         dock_station_id = distance_matrix.shape[0] - 1  # 마지막 인덱스가 도킹 스테이션
 
         min_cost = float('inf')
@@ -199,28 +238,45 @@ class Agent:
                 min_cost = total_cost
                 optimal_visit_order = list(perm)
 
-        # self.log(optimal_visit_order)
-
         return optimal_visit_order
     
-    def global_planner(self, start_node_index, end_node_index):
+    def global_planner(self, start_node_index, end_node_index, map_id):
         """
         Index rules
         - index of region is a index of matrix
         - last index is for docking station
         - (last - 1) index is for start position
         
-        reference_waypoint_matrix[i][j] : waypoints from i to j
+        reference_waypoint_matrix[i][j] : waypoints from start node i to end node j
         """
-        map0_reference_waypoint_matrix = [[[] for _ in range(4)] for _ in range(4)]
-        map0_reference_waypoint_matrix[0][1] = [(-1, 2), (-1, -2)]
-        map0_reference_waypoint_matrix[0][3] = [(1.4, -3)]
-        map0_reference_waypoint_matrix[1][0] = [(-1, 1.6), (1, 1.8)]
-        map0_reference_waypoint_matrix[1][3] = [(-0.8, 1.6), (0.2, 1.2), (1.4, -3)]
-        map0_reference_waypoint_matrix[2][0] = [(1, 1.8)]
-        map0_reference_waypoint_matrix[2][1] = [(0.2, 1.6), (-0.8, 1.6), (-1, -2)]
-        return map0_reference_waypoint_matrix[start_node_index][end_node_index]
 
+        reference_waypoints = {
+            0: {
+                (0, 1): [(-1, 2), (-1, -2)],
+                (0, 3): [(1.4, -3)],
+                (1, 0): [(-1, 1.6), (1, 1.8)],
+                (1, 3): [(-0.8, 1.6), (0.2, 1.2), (1.4, -3)],
+                (2, 0): [(1, 1.8)],
+                (2, 1): [(0.2, 1.6), (-0.8, 1.6), (-1, -2)],
+            },
+            1: {
+                (5, 1): [(-0.8, -0.8), (0, -0.8)]
+            },  # map_id=1의 waypoint 정의 가능
+            2: {},  # map_id=2의 waypoint 정의 가능
+            3: {},  # map_id=3의 waypoint 정의 가능
+        }
+
+        map_reference_waypoints = reference_waypoints[map_id]
+        
+        # Check validity of map_id
+        if map_id not in reference_waypoints:
+            return None
+
+        # Check validity of node indexes
+        if (start_node_index, end_node_index) not in map_reference_waypoints:
+            return None
+
+        return map_reference_waypoints[(start_node_index, end_node_index)]
 
     def controller(self, current_robot_pose, target_position, 
                 linear_gain=1.0, angular_gain=2.0, 
@@ -259,7 +315,8 @@ class Agent:
             current_time,
             pollution_end_time,
             current_robot_pose, 
-            current_fsm_state, 
+            current_fsm_state,
+            map_id 
             ):
         """
         current_fsm_state -> next_fsm_state, action
@@ -269,6 +326,20 @@ class Agent:
         FSM_CLEANING = "CLEANING"
         FSM_NAVIGATING = "NAVIGATING"
         FSM_RETURNING = "RETURNING"
+
+        # Indexes of initial node and docking station node by map
+        if map_id == 0:
+            initial_node_index = 2
+            docking_station_node_index = 3
+        elif map_id == 1:
+            initial_node_index = 5
+            docking_station_node_index = 6
+        elif map_id == 2:
+            initial_node_index = 8
+            docking_station_node_index = 9
+        elif map_id == 3:
+            initial_node_index = 13
+            docking_station_node_index = 14
 
         def calculate_distance_to_target_position(current_position, target_position):
             """
@@ -301,15 +372,16 @@ class Agent:
             optimal_visit_order = self.mission_planner(
                 air_sensor_pollution_data, 
                 robot_sensor_pollution_data, 
-                current_node_index=2 # 일반화 필요
+                current_node_index=initial_node_index,
+                map_id=map_id
                 )
 
             # State transition
             # READY -> NAVIGATING
-            if optimal_visit_order != None: # 목표 구역이 있음 (상태 전이)
+            if optimal_visit_order != None: # 목표 구역이 있음
                 next_fsm_state = FSM_NAVIGATING
                 self.optimal_next_node_index = optimal_visit_order[0]
-                self.waypoints = self.global_planner(start_node_index=2, end_node_index=self.optimal_next_node_index)
+                self.waypoints = self.global_planner(start_node_index=initial_node_index, end_node_index=self.optimal_next_node_index, map_id=map_id)
                 self.current_waypoint_index = 0
                 self.tmp_target_position = self.waypoints[0]
             
@@ -325,7 +397,7 @@ class Agent:
         elif current_fsm_state == FSM_NAVIGATING:
             # State transition
             # NAVIGATING -> CLEANING
-            if is_target_reached(current_robot_position, self.waypoints[-1]): # 목표 구역에 도달함 (상태 전이):
+            if is_target_reached(current_robot_position, self.waypoints[-1]): # 목표 구역에 도달함
                 next_fsm_state = FSM_CLEANING
                 self.current_waypoint_index = 0
                 self.current_node_index = self.optimal_next_node_index
@@ -350,29 +422,27 @@ class Agent:
             optimal_visit_order = self.mission_planner(
                 air_sensor_pollution_data, 
                 robot_sensor_pollution_data, 
-                current_node_index=self.current_node_index
+                current_node_index=self.current_node_index,
+                map_id=map_id
                 )          
 
             # State transition
             # CLEANING -> RETURNING
-            if are_no_polluted_rooms(air_sensor_pollution_data):     # 오염 구역이 없음 (상태 전이)
+            if are_no_polluted_rooms(air_sensor_pollution_data) and current_time >= pollution_end_time:     # 오염 구역이 없음
                 next_fsm_state = FSM_RETURNING
 
                 self.current_waypoint_index = 0
-                self.waypoints = self.global_planner(start_node_index=self.current_node_index, end_node_index=3)
+                self.waypoints = self.global_planner(start_node_index=self.current_node_index, end_node_index=docking_station_node_index, map_id=map_id)
                 self.tmp_target_position = self.waypoints[0]
 
             # CLEANING -> NAVIGATING
-            elif air_sensor_pollution_data[self.optimal_next_node_index] == 0 and optimal_visit_order != None:       # 청정 완료함 (상태 전이)
+            elif air_sensor_pollution_data[self.optimal_next_node_index] == 0 and optimal_visit_order != None:       # 청정 완료함
                 next_fsm_state = FSM_NAVIGATING
 
                 # 꼭 이때 해야 할까?
                 self.optimal_next_node_index = optimal_visit_order[0]
-                self.log(self.current_node_index)
-                self.log(self.optimal_next_node_index)
-                self.waypoints = self.global_planner(start_node_index=self.current_node_index, end_node_index=self.optimal_next_node_index)
+                self.waypoints = self.global_planner(start_node_index=self.current_node_index, end_node_index=self.optimal_next_node_index, map_id=map_id)
                 self.current_waypoint_index = 0
-                self.log(self.waypoints)
                 self.tmp_target_position = self.waypoints[0]  
 
             # CLEANING -> CLEANING
