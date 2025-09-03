@@ -12,7 +12,7 @@ class Agent:
         self.current_robot_pose = (0.0, 0.0, 0.0)
 
         # Finite state machine
-        self.current_fsm_state = "WAITING"
+        self.current_fsm_state = "READY"
         self.waypoints = []
         self.current_waypoint_index = 0
         self.tmp_target_position = None
@@ -48,7 +48,6 @@ class Agent:
         """
         self.map_info = map_info
         self.pollution_end_time = map_info.pollution_end_time
-        self.get_room_id = map_info.get_room_id
 
         # Initialize robot pose
         initial_robot_position = map_info.starting_pos
@@ -78,16 +77,25 @@ class Agent:
         MODE가 0인 경우: 이동 명령, Twist 컨트롤로 선속도(LINEAR) 및 각속도(ANGULAR) 조절. 최대값 1m/s, 2rad/s
         MODE가 1인 경우: 청정 명령, 제자리에서 공기를 청정. LINEAR, ANGULAR는 무시됨. 청정 명령을 유지한 후 1초가 지나야 실제로 청정이 시작됨
         """
-        # Mission planning
-        air_sensor_pollution_data = observation['air_sensor_pollution']
-        robot_sensor_pollution_data =  observation['sensor_pollution']
 
         # --------------------------------------------------
-        next_state, action = self.fsm(
+        # Observation
+        air_sensor_pollution_data = observation['air_sensor_pollution']
+        robot_sensor_pollution_data =  observation['sensor_pollution']
+        pollution_end_time = self.pollution_end_time
+        current_robot_pose = self.current_robot_pose
+
+        # Current time
+        dt = 0.1
+        current_time = self.steps * dt
+
+        next_state, action = self.finite_state_machine(
             air_sensor_pollution_data,
             robot_sensor_pollution_data,
-            self.current_fsm_state,
-            self.current_robot_pose
+            current_time,
+            pollution_end_time,
+            current_robot_pose,
+            self.current_fsm_state
         )
         self.current_fsm_state = next_state 
         # --------------------------------------------------
@@ -119,8 +127,8 @@ class Agent:
         all_pollution: np.ndarray, 거치형 에어 센서가 없는 방까지 포함한 오염도 정보
         ---
         """
+        # Only simulation
         self.current_robot_pose = (info["robot_position"][0], info["robot_position"][1], info["robot_angle"])
-        # self.log(self.current_robot_pose)
 
     def reset(self):
         """
@@ -135,6 +143,9 @@ class Agent:
         ROS Node의 logger를 호출.
         """
         self.logger(str(msg))
+
+    # ----------------------------------------------------------------------------------------------------
+    # New defined functions
 
     def mission_planner(self, air_sensor_pollution_data, robot_sensor_pollution_data, current_node_index):
         """
@@ -202,7 +213,7 @@ class Agent:
         reference_waypoint_matrix[i][j] : waypoints from i to j
         """
         map0_reference_waypoint_matrix = [[[] for _ in range(4)] for _ in range(4)]
-        map0_reference_waypoint_matrix[0][1] = [(-1, 1), (-1, -2)]
+        map0_reference_waypoint_matrix[0][1] = [(-1, 2), (-1, -2)]
         map0_reference_waypoint_matrix[0][3] = [(1.4, -3)]
         map0_reference_waypoint_matrix[1][0] = [(-1, 1.6), (1, 1.8)]
         map0_reference_waypoint_matrix[1][3] = [(-0.8, 1.6), (0.2, 1.2), (1.4, -3)]
@@ -241,19 +252,20 @@ class Agent:
         return linear_velocity, angular_velocity
 
 
-
-
-    def fsm(self,
+    # Main Logic
+    def finite_state_machine(self,
             air_sensor_pollution_data,
             robot_sensor_pollution_data,
-            current_fsm_state, 
+            current_time,
+            pollution_end_time,
             current_robot_pose, 
+            current_fsm_state, 
             ):
         """
         current_fsm_state -> next_fsm_state, action
         """
         # Define states of finite state machine
-        FSM_WAITING = "WAITING"
+        FSM_READY = "READY"
         FSM_CLEANING = "CLEANING"
         FSM_NAVIGATING = "NAVIGATING"
         FSM_RETURNING = "RETURNING"
@@ -281,26 +293,44 @@ class Agent:
 
         current_robot_position = current_robot_pose[0], current_robot_pose[1]
 
-        if current_fsm_state == FSM_WAITING:
+        # ---------------------------------------------------------------------------- #
+        # [State] READY (state state) ------------------------------------------------ #
+        # ---------------------------------------------------------------------------- #
+        if current_fsm_state == FSM_READY:
             # Mission planning
-            optimal_visit_order = self.mission_planner(air_sensor_pollution_data, robot_sensor_pollution_data, current_node_index=2)
+            optimal_visit_order = self.mission_planner(
+                air_sensor_pollution_data, 
+                robot_sensor_pollution_data, 
+                current_node_index=2 # 일반화 필요
+                )
 
+            # State transition
+            # READY -> NAVIGATING
             if optimal_visit_order != None: # 목표 구역이 있음 (상태 전이)
                 next_fsm_state = FSM_NAVIGATING
                 self.optimal_next_node_index = optimal_visit_order[0]
                 self.waypoints = self.global_planner(start_node_index=2, end_node_index=self.optimal_next_node_index)
                 self.current_waypoint_index = 0
                 self.tmp_target_position = self.waypoints[0]
+            
+            # READY -> READY
             else:
-                next_fsm_state = FSM_WAITING
+                next_fsm_state = FSM_READY
 
             action = (0, 0, 0) # Stop
 
+        # ---------------------------------------------------------------------------- #
+        # [State] Navigating --------------------------------------------------------- #
+        # ---------------------------------------------------------------------------- #
         elif current_fsm_state == FSM_NAVIGATING:
+            # State transition
+            # NAVIGATING -> CLEANING
             if is_target_reached(current_robot_position, self.waypoints[-1]): # 목표 구역에 도달함 (상태 전이):
                 next_fsm_state = FSM_CLEANING
                 self.current_waypoint_index = 0
                 self.current_node_index = self.optimal_next_node_index
+            
+            # NAVIGATING -> NAVIGATING
             else:
                 next_fsm_state = FSM_NAVIGATING
 
@@ -312,10 +342,19 @@ class Agent:
             linear_velocity, angular_velocity = self.controller(current_robot_pose, self.tmp_target_position)
             action = (0, linear_velocity, angular_velocity)
 
+        # ---------------------------------------------------------------------------- #
+        # [State] CLEANING ----------------------------------------------------------- #
+        # ---------------------------------------------------------------------------- #
         elif current_fsm_state == FSM_CLEANING:
             # Mission planning
-            optimal_visit_order = self.mission_planner(air_sensor_pollution_data, robot_sensor_pollution_data, current_node_index=self.current_node_index)          
+            optimal_visit_order = self.mission_planner(
+                air_sensor_pollution_data, 
+                robot_sensor_pollution_data, 
+                current_node_index=self.current_node_index
+                )          
 
+            # State transition
+            # CLEANING -> RETURNING
             if are_no_polluted_rooms(air_sensor_pollution_data):     # 오염 구역이 없음 (상태 전이)
                 next_fsm_state = FSM_RETURNING
 
@@ -323,6 +362,7 @@ class Agent:
                 self.waypoints = self.global_planner(start_node_index=self.current_node_index, end_node_index=3)
                 self.tmp_target_position = self.waypoints[0]
 
+            # CLEANING -> NAVIGATING
             elif air_sensor_pollution_data[self.optimal_next_node_index] == 0 and optimal_visit_order != None:       # 청정 완료함 (상태 전이)
                 next_fsm_state = FSM_NAVIGATING
 
@@ -335,11 +375,15 @@ class Agent:
                 self.log(self.waypoints)
                 self.tmp_target_position = self.waypoints[0]  
 
+            # CLEANING -> CLEANING
             else:
                 next_fsm_state = FSM_CLEANING
             
             action = (1, 0, 0) # Stop and clean
 
+        # ---------------------------------------------------------------------------- #
+        # [State] RETURNING (end state) ---------------------------------------------- #
+        # ---------------------------------------------------------------------------- #
         elif current_fsm_state == FSM_RETURNING:
             next_fsm_state = FSM_RETURNING
             
@@ -350,6 +394,7 @@ class Agent:
                 self.current_waypoint_index += 1
                 self.tmp_target_position = self.waypoints[self.current_waypoint_index]
 
-        self.log(current_fsm_state)
+        # log
+        self.log(f"{current_time:.1f}: {current_fsm_state}")
 
         return next_fsm_state, action
