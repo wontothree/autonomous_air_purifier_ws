@@ -30,8 +30,8 @@
 ```bash
 # dependencies
 apt update
-apt install ros-humble-joint-state-publisher # ros2 pkg list | grep joint_state_publisher
 apt install ros-humble-gazebo-ros-pkgs       # gazebo
+apt install ros-humble-joint-state-publisher # ros2 pkg list | grep joint_state_publisher
 ```
 
 ```bash
@@ -45,7 +45,7 @@ gazebo /root/autonomous_navigation_ws/install/gazebo_simulator/share/gazebo_simu
 ros2 launch gazebo_simulator robot_world.launch.py
 ```
 
-[http://localhost:8080/vnc.html](http://localhost:8080/vnc.html)
+[http://localhost:8090/vnc.html](http://localhost:8090/vnc.html)
 
 ```bash
 ps aux | grep -E 'gzserver|gzclient|ros2'
