@@ -9,9 +9,5 @@
     "extensions": [
         "ms-iot.vscode-ros"
     ],
-    "remoteUser": "root",
-    "forwardPorts": [
-        11311,
-        8090
-    ]
+    "remoteUser": "root"
 }

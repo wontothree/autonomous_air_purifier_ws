@@ -14,14 +14,3 @@ services:
       - ..:/root/autonomous_agent_ws
     environment:
       - ROS_DOMAIN_ID=0
-    depends_on:
-      - novnc
-
-  novnc:
-    image: theasp/novnc:latest
-    container_name: autonomous_agent_novnc
-    environment:
-      - DISPLAY_WIDTH=1728
-      - DISPLAY_HEIGHT=972
-    ports:
-      - "8080:8080" # http://localhost:8080/vnc.html

@@ -11,9 +11,8 @@ WORKDIR /root/autonomous_agent_ws
 
 # Update & install Gazebo ROS packages
 RUN apt-get update && \
-    apt-get install -y \
-        ros-humble-gazebo-ros-pkgs \
-    && rm -rf /var/lib/apt/lists/*
+    apt-get install -y ros-humble-gazebo-ros-pkgs && \
+    rm -rf /var/lib/apt/lists/*
 
 # Source ROS setup
 RUN echo "source /opt/ros/humble/setup.bash" >> ~/.bashrc
