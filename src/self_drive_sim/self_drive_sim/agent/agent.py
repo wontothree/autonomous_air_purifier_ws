@@ -303,17 +303,23 @@ class Map:
 
 @dataclass
 class Pose:
-    """A data class representing the 2D pose (x, y) and orientation (yaw) of a robot or particle."""
+    """
+    A data class representing the 2D pose (x, y) and orientation (yaw) of a robot or particle.
+    """
     x: float = 0.0
     y: float = 0.0
     _yaw: float = 0.0
 
     def __post_init__(self):
-        """Normalizes the yaw value after the object is initialized."""
+        """
+        Normalizes the yaw value after the object is initialized.
+        """
         self._normalize_yaw()
 
     def _normalize_yaw(self):
-        """Normalizes the yaw value to the range [-pi, +pi]."""
+        """
+        Normalizes the yaw value to the range [-pi, +pi].
+        """
         self._yaw = math.atan2(math.sin(self._yaw), math.cos(self._yaw))
 
     @property
@@ -326,7 +332,9 @@ class Pose:
         self._normalize_yaw()
 
     def update(self, x: float, y: float, yaw: float):
-        """Updates the pose values at once."""
+        """
+        Updates the pose values at once.
+        """
         self.x = x
         self.y = y
         self.yaw = yaw
@@ -552,57 +560,54 @@ class ParticleFilter:
 
         Returns
         -------
-        pose : dict
             - x: estimated x position
             - y: estimated y position
             - yaw: estimated orientation
-        """
-        # 파티클 수
-        particle_num = len(self.particle_set)
+
+        Using
+        ------
+            - self.particle_set
+        """        
+        xs = np.array([particle.pose.x for particle in self.particle_set])
+        ys = np.array([particle.pose.y for particle in self.particle_set])
+        yaws = np.array([particle.pose.yaw for particle in self.particle_set])
+        weights = np.array([particle.weight for particle in self.particle_set])
         
-        # 각 파티클의 위치와 yaw, 가중치 배열 생성
-        xs = np.array([p.pose.x for p in self.particle_set])
-        ys = np.array([p.pose.y for p in self.particle_set])
-        yaws = np.array([p.pose.yaw for p in self.particle_set])
-        weights = np.array([p.weight for p in self.particle_set])
+        # Weighted sum for x and y
+        estimated_x = np.sum(xs * weights)
+        estimated_y = np.sum(ys * weights)
         
-        # 가중 평균 계산
-        x_est = np.sum(xs * weights)
-        y_est = np.sum(ys * weights)
-        
-        # yaw는 cos/sin 평균 후 atan2
+        # Weighted sum for yaw
         cos_yaw = np.sum(np.cos(yaws) * weights)
         sin_yaw = np.sum(np.sin(yaws) * weights)
-        yaw_est = math.atan2(sin_yaw, cos_yaw)
+        estimated_yaw = math.atan2(sin_yaw, cos_yaw)
         
-        return {"x": x_est, "y": y_est, "yaw": yaw_est}
-
+        return estimated_x, estimated_y, estimated_yaw
 
     def resample_particles(self):
         """
         Low-variance resampling of particles based on their weights.
         """
-        N = len(self.particle_set)
-        weights = np.array([p.weight for p in self.particle_set])
+        particle_num = len(self.particle_set)
+        weights = np.array([particle.weight for particle in self.particle_set])
         weights /= np.sum(weights)  # normalize
 
-        positions = (np.arange(N) + np.random.uniform()) / N
+        positions = (np.arange(particle_num) + np.random.uniform()) / particle_num
         cumulative_sum = np.cumsum(weights)
-        indexes = np.searchsorted(cumulative_sum, positions)
+        indices = np.searchsorted(cumulative_sum, positions)
 
-        # 새로운 파티클 집합 생성
+        # Resampled particle set
         self.particle_set = [
             Particle(pose=Pose(
                 x=self.particle_set[i].pose.x,
                 y=self.particle_set[i].pose.y,
                 _yaw=self.particle_set[i].pose.yaw),
-                weight=1.0 / N
+                weight=1.0 / particle_num
             )
-            for i in indexes
+            for i in indices
         ]
 
 # ----------
-
 
 class Agent:
     def __init__(self, logger):
@@ -664,6 +669,11 @@ class Agent:
         initial_robot_yaw = map_info.starting_angle
         self.current_robot_pose = (initial_robot_position[0], initial_robot_position[1], initial_robot_yaw)
 
+        # test
+        self.simple_estimated_x = map_info.starting_pos[0]
+        self.simple_estimated_y = map_info.starting_pos[1]
+        self.simple_estimated_yaw = map_info.starting_angle
+
     def act(self, observation: Observation):
         """
         env로부터 Observation을 전달받아 action을 반환하는 함수
@@ -695,30 +705,49 @@ class Agent:
         pollution_end_time = self.pollution_end_time
         current_robot_pose = self.current_robot_pose
 
-        # localization
+        # Localization
         delta_distance = np.linalg.norm(observation["disp_position"])
-        self.particle_filter.update_particles_by_motion_model(delta_distance=delta_distance, delta_yaw=observation["disp_angle"])
+        delta_yaw = observation["disp_angle"]
+        self.particle_filter.update_particles_by_motion_model(delta_distance, delta_yaw)
         self.particle_filter.update_weights_by_measurement_model(
             scan_ranges=observation["sensor_lidar_front"],
             occupancy_grid_map=self.occupancy_grid_map,
             distance_map=self.distance_map
         )
-        estimated_pose = self.particle_filter.estimate_robot_pose()
+        estimated_x, estimated_y, estimated_yaw = self.particle_filter.estimate_robot_pose()
         self.particle_filter.resample_particles()
 
-        # self.log(f"True: {self.current_robot_pose}, estimation: {estimated_pose}")
-        # 현재 로봇 포즈와 추정 포즈
+        # Distance between true and estimated position
         true_x, true_y, true_yaw = self.current_robot_pose[0], self.current_robot_pose[1], self.current_robot_pose[2]
-        est_x, est_y, est_yaw = estimated_pose['x'], estimated_pose['y'], estimated_pose['yaw']
-
-        # 거리 차이
+        est_x, est_y, est_yaw = estimated_x, estimated_y, estimated_yaw
         distance_error = math.hypot(est_x - true_x, est_y - true_y)
 
-        # yaw 차이 ([-pi, pi] 범위로 정규화)
+        # difference between true and estimated yaw
         yaw_error = (est_yaw - true_yaw + math.pi) % (2 * math.pi) - math.pi
 
-        # 출력
-        self.log(f"Distance error: {distance_error:.3f} m, Yaw error: {math.degrees(yaw_error):.2f} deg")
+        # dead recording
+        # 1. 이전 상태 값을 지역 변수로 가져옴
+        x, y, yaw = self.simple_estimated_x, self.simple_estimated_y, self.simple_estimated_yaw
+
+        # 2. 지역 변수를 사용하여 새로운 상태 값을 계산
+        new_x = x + delta_distance * math.cos(yaw)
+        new_y = y + delta_distance * math.sin(yaw)
+        new_yaw = yaw + delta_yaw
+
+        # 3. 최종적으로 계산된 결과를 모두 멤버 변수에 업데이트
+        self.simple_estimated_x = new_x
+        self.simple_estimated_y = new_y
+        self.simple_estimated_yaw = new_yaw
+
+        # self.log(f"Dead Recording: {self.simple_estimated_x}, {self.simple_estimated_y} | True: {true_x}, {true_y}")
+        dx = self.simple_estimated_x - true_x
+        dy = self.simple_estimated_y - true_y
+        distance_error = math.hypot(dx, dy)
+
+        self.log(f"Dead Recording: ({self.simple_estimated_x:.3f}, {self.simple_estimated_y:.3f}) | True: ({true_x:.3f}, {true_y:.3f}) | Distance error: {distance_error:.3f}")
+        # print
+        # self.log(f"Distance error: {distance_error:.3f} m, Yaw error: {math.degrees(yaw_error):.2f} deg, Max distance error: {max_distance_error}")
+        # Localization
 
 
 
