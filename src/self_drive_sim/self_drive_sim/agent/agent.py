@@ -732,16 +732,6 @@ class Agent:
         self.localizer(delta_distance, delta_yaw, scan_ranges)
         current_robot_pose = self.current_robot_pose
 
-        # Localization by Particle Filter
-        # self.particle_filter.update_particles_by_motion_model(delta_distance, delta_yaw)
-        # self.particle_filter.update_weights_by_measurement_model(
-            # scan_ranges=observation["sensor_lidar_front"],
-        #     occupancy_grid_map=self.occupancy_grid_map,
-        #     distance_map=self.distance_map
-        # )
-        # estimated_x, estimated_y, estimated_yaw = self.particle_filter.estimate_robot_pose()
-        # self.particle_filter.resample_particles()
-
         # Current time
         dt = 0.1
         current_time = self.steps * dt
@@ -819,6 +809,9 @@ class Agent:
         """
         self.steps = 0
 
+        # 
+        self.current_fsm_state = "READY"
+
     def log(self, msg):
         """
         터미널에 로깅하는 함수. print를 사용하면 비정상적으로 출력됨.
@@ -835,7 +828,7 @@ class Agent:
             robot_sensor_pollution_data, 
             current_node_index,
             map_id,
-            pollution_threshold=0.1
+            pollution_threshold=0.01
             ):
         """
         미션 플래너: 오염 감지된 방들을 기반으로 TSP 순서에 따라 task queue 생성
@@ -1178,7 +1171,7 @@ class Agent:
                 self.tmp_target_position = self.waypoints[0]
 
             # CLEANING -> NAVIGATING
-            elif air_sensor_pollution_data[self.optimal_next_node_index] < 0.1 and optimal_visit_order != None:       # 청정 완료함
+            elif air_sensor_pollution_data[self.optimal_next_node_index] < 0.01 and optimal_visit_order != None:       # 청정 완료함
                 next_fsm_state = FSM_NAVIGATING
 
                 # 꼭 이때 해야 할까?
