@@ -1,0 +1,45 @@
+{
+  "random_seed": 17571764077,
+  "average_score": 0.0,
+  "data": [
+    {
+      "timestamp": "2025-09-06 16:42:14",
+      "score": 0.0,
+      "purify_score": 0.0,
+      "time_score": 0.0,
+      "done": false,
+      "terminated": true,
+      "early_return": false,
+      "done_time": 1800.0,
+      "collisions": 1,
+      "purify_amount": 39.000000000000185,
+      "message": "Score: 0 (terminated)"
+    },
+    {
+      "timestamp": "2025-09-06 16:42:29",
+      "score": 0.0,
+      "purify_score": 0.0,
+      "time_score": 0.0,
+      "done": false,
+      "terminated": true,
+      "early_return": false,
+      "done_time": 1800.0,
+      "collisions": 0,
+      "purify_amount": 0.0,
+      "message": "Score: 0 (terminated)"
+    },
+    {
+      "timestamp": "2025-09-06 16:42:46",
+      "score": 0.0,
+      "purify_score": 0.0,
+      "time_score": 0.0,
+      "done": false,
+      "terminated": true,
+      "early_return": false,
+      "done_time": 1800.0,
+      "collisions": 0,
+      "purify_amount": 0.0,
+      "message": "Score: 0 (terminated)"
+    }
+  ]
+}

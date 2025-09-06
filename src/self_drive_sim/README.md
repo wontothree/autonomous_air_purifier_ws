@@ -134,10 +134,6 @@ ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args --remap cmd_vel:
 - /tf                              
 - /tf_static                       
 
-# Nodes
-
-`rmc_localizer_node`
-
 # Visualization
 
 ```bash

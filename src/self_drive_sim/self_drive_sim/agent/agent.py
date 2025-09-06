@@ -449,7 +449,7 @@ class ParticleFilter:
         angle_increment=0.016,
         min_range=0.05,
         max_range=8.0,
-        scan_step=5, # or beam_sample_count
+        scan_step=3, # or beam_sample_count
         
         # Map
         map_origin=(14, 20),
@@ -615,6 +615,8 @@ class Agent:
         self.steps = 0
 
         self.current_robot_pose = (0.0, 0.0, 0.0)
+        self.true_robot_pose = (0.0, 0.0, 0.0)
+        self.map_id = None
 
         # Finite state machine
         self.current_fsm_state = "READY"
@@ -624,14 +626,11 @@ class Agent:
         self.optimal_next_node_index = None
         self.current_node_index = None
 
-        # test
+        # Particle filter
         self.particle_filter = ParticleFilter()
-        initial_pose = Pose(2.0, 0.0, 1.5708)
-        self.particle_filter.initialize_particles(initial_pose)
-
-        map_obj = Map()
-        self.occupancy_grid_map = map_obj.string_to_numpy_array_map(Map.ORIGINAL_STRING_MAP0)
-        self.distance_map = map_obj.occupancy_grid_to_distance_map(self.occupancy_grid_map)
+        self.map_obj = Map()
+        self.occupancy_grid_map = None
+        self.distance_map = None
 
 
     def initialize_map(self, map_info: MapInfo):
@@ -661,7 +660,6 @@ class Agent:
         pos2grid: (pos) -> (grid_x, grid_y), 실제 world 좌표를 격자 좌표로 변환하는 함수
         ---
         """
-        self.map_info = map_info
         self.pollution_end_time = map_info.pollution_end_time
 
         # Initialize robot pose
@@ -669,10 +667,30 @@ class Agent:
         initial_robot_yaw = map_info.starting_angle
         self.current_robot_pose = (initial_robot_position[0], initial_robot_position[1], initial_robot_yaw)
 
-        # test
-        self.simple_estimated_x = map_info.starting_pos[0]
-        self.simple_estimated_y = map_info.starting_pos[1]
-        self.simple_estimated_yaw = map_info.starting_angle
+        # Identify map
+        if map_info.num_rooms == 2: 
+            self.map_id = 0
+            map = Map.ORIGINAL_STRING_MAP0
+        elif map_info.num_rooms == 5: 
+            self.map_id = 1
+            map = Map.ORIGINAL_STRING_MAP1
+        elif map_info.num_rooms == 8:
+            self.map_id = 2
+            map = Map.ORIGINAL_STRING_MAP2
+        elif map_info.num_rooms == 13:
+            self.map_id = 3
+            map = Map.ORIGINAL_STRING_MAP3
+
+        self.log(f"map id: {self.map_id}")
+
+        # Particle filter
+        initial_pose = Pose(x=self.current_robot_pose[0],
+                            y=self.current_robot_pose[1],
+                            _yaw=self.current_robot_pose[2])
+        self.particle_filter.initialize_particles(initial_pose)
+
+        self.occupancy_grid_map = self.map_obj.string_to_numpy_array_map(map)
+        self.distance_map = self.map_obj.occupancy_grid_to_distance_map(self.occupancy_grid_map)
 
     def act(self, observation: Observation):
         """
@@ -700,56 +718,29 @@ class Agent:
 
         # --------------------------------------------------
         # Observation
+        # pollution data
         air_sensor_pollution_data = observation['air_sensor_pollution']
         robot_sensor_pollution_data =  observation['sensor_pollution']
         pollution_end_time = self.pollution_end_time
+        # IMU data
+        delta_distance = np.linalg.norm(observation["disp_position"])
+        delta_yaw = observation['disp_angle']
+        # LiDAR data
+        scan_ranges = observation['sensor_lidar_front']
+
+        # Localization
+        self.localizer(delta_distance, delta_yaw, scan_ranges)
         current_robot_pose = self.current_robot_pose
 
-        # Localization
-        delta_distance = np.linalg.norm(observation["disp_position"])
-        delta_yaw = observation["disp_angle"]
-        self.particle_filter.update_particles_by_motion_model(delta_distance, delta_yaw)
-        self.particle_filter.update_weights_by_measurement_model(
-            scan_ranges=observation["sensor_lidar_front"],
-            occupancy_grid_map=self.occupancy_grid_map,
-            distance_map=self.distance_map
-        )
-        estimated_x, estimated_y, estimated_yaw = self.particle_filter.estimate_robot_pose()
-        self.particle_filter.resample_particles()
-
-        # Distance between true and estimated position
-        true_x, true_y, true_yaw = self.current_robot_pose[0], self.current_robot_pose[1], self.current_robot_pose[2]
-        est_x, est_y, est_yaw = estimated_x, estimated_y, estimated_yaw
-        distance_error = math.hypot(est_x - true_x, est_y - true_y)
-
-        # difference between true and estimated yaw
-        yaw_error = (est_yaw - true_yaw + math.pi) % (2 * math.pi) - math.pi
-
-        # dead recording
-        # 1. 이전 상태 값을 지역 변수로 가져옴
-        x, y, yaw = self.simple_estimated_x, self.simple_estimated_y, self.simple_estimated_yaw
-
-        # 2. 지역 변수를 사용하여 새로운 상태 값을 계산
-        new_x = x + delta_distance * math.cos(yaw)
-        new_y = y + delta_distance * math.sin(yaw)
-        new_yaw = yaw + delta_yaw
-
-        # 3. 최종적으로 계산된 결과를 모두 멤버 변수에 업데이트
-        self.simple_estimated_x = new_x
-        self.simple_estimated_y = new_y
-        self.simple_estimated_yaw = new_yaw
-
-        # self.log(f"Dead Recording: {self.simple_estimated_x}, {self.simple_estimated_y} | True: {true_x}, {true_y}")
-        dx = self.simple_estimated_x - true_x
-        dy = self.simple_estimated_y - true_y
-        distance_error = math.hypot(dx, dy)
-
-        self.log(f"Dead Recording: ({self.simple_estimated_x:.3f}, {self.simple_estimated_y:.3f}) | True: ({true_x:.3f}, {true_y:.3f}) | Distance error: {distance_error:.3f}")
-        # print
-        # self.log(f"Distance error: {distance_error:.3f} m, Yaw error: {math.degrees(yaw_error):.2f} deg, Max distance error: {max_distance_error}")
-        # Localization
-
-
+        # Localization by Particle Filter
+        # self.particle_filter.update_particles_by_motion_model(delta_distance, delta_yaw)
+        # self.particle_filter.update_weights_by_measurement_model(
+            # scan_ranges=observation["sensor_lidar_front"],
+        #     occupancy_grid_map=self.occupancy_grid_map,
+        #     distance_map=self.distance_map
+        # )
+        # estimated_x, estimated_y, estimated_yaw = self.particle_filter.estimate_robot_pose()
+        # self.particle_filter.resample_particles()
 
         # Current time
         dt = 0.1
@@ -762,7 +753,7 @@ class Agent:
             pollution_end_time,
             current_robot_pose,
             self.current_fsm_state,
-            map_id=0
+            self.map_id
         )
         self.current_fsm_state = next_state 
         # --------------------------------------------------
@@ -819,7 +810,7 @@ class Agent:
         ---
         """
         # Only simulation
-        self.current_robot_pose = (info["robot_position"][0], info["robot_position"][1], info["robot_angle"])
+        self.true_robot_pose = (info["robot_position"][0], info["robot_position"][1], info["robot_angle"])
 
     def reset(self):
         """
@@ -838,7 +829,14 @@ class Agent:
     # ----------------------------------------------------------------------------------------------------
     # New defined functions
 
-    def mission_planner(self, air_sensor_pollution_data, robot_sensor_pollution_data, current_node_index, map_id):
+    def mission_planner(
+            self, 
+            air_sensor_pollution_data, 
+            robot_sensor_pollution_data, 
+            current_node_index,
+            map_id,
+            pollution_threshold=0.1
+            ):
         """
         미션 플래너: 오염 감지된 방들을 기반으로 TSP 순서에 따라 task queue 생성
 
@@ -852,38 +850,43 @@ class Agent:
             - best_path: List[int], 방문해야 할 방의 순서
         """
         distance_matrices = {
-            0: np.array([
-                [0, 29, 12, 43],
-                [29, 0, 33, 27],
-                [12, 33, 0, 15],
-                [43, 27, 15, 0]
-            ]),
-            1: np.array([
-                [0, 0, 0, 0, 0, 0, 0],
-                [0, 0, 0, 0, 0, 0, 0],
-                [0, 0, 0, 0, 0, 0, 0],
-                [0, 0, 0, 0, 0, 0, 0],
-                [0, 0, 0, 0, 0, 0, 0],
-                [0, 0, 0, 0, 0, 0, 0],
-                [0, 0, 0, 0, 0, 0, 0],
-            ]),  
-            2: np.array([]),
-            3: np.array([]),
+            0: [
+                [0.0, 4.0, 0.0, 5.5],
+                [5.6, 0.0, 0.0, 9.1],
+                [2.1, 7.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 0.0],
+            ],
+            1: [
+                [0.0, 4.6, 4.7, 5.0, 8.0, 0.2, 4.1],
+                [4.6, 0.0, 8.1, 9.0, 13.1, 4.7, 7.4],
+                [4.7, 8.1, 0.0, 7.1, 11.6, 4.8, 8.8],
+                [5.0, 9.0, 7.1, 0.0, 11.6, 5.0, 9.0],
+                [8.0, 12.5, 11.6, 11.6, 0.0, 7.8, 7.8],
+                [0.2, 4.7, 4.9, 5.0, 7.8, 0.0, 4.0],
+                [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            ],
+            2: [],
+            3: [],
         }
 
         unobserved_potential_regions = []
 
+        if map_id == 0: room_num = 2
+        elif map_id == 1: room_num = 5
+        elif map_id == 2: room_num = 8
+        elif map_id == 3: room_num = 13
+
         # Polluted regions
         observed_polluted_regions = [
-            room_id for room_id in range(self.map_info.num_rooms)
-            if air_sensor_pollution_data[room_id] > 0
+            room_id for room_id in range(room_num)
+            if air_sensor_pollution_data[room_id] > pollution_threshold
         ]
 
         if not observed_polluted_regions:
             return
 
         distance_matrix = distance_matrices.get(map_id) 
-        dock_station_id = distance_matrix.shape[0] - 1  # 마지막 인덱스가 도킹 스테이션
+        dock_station_id = len(distance_matrix) - 1  # 마지막 인덱스가 도킹 스테이션
 
         min_cost = float('inf')
         optimal_visit_order = []
@@ -926,10 +929,50 @@ class Agent:
                 (2, 1): [(0.2, 1.6), (-0.8, 1.6), (-1, -2)],
             },
             1: {
-                (5, 1): [(-0.8, -0.8), (0, -0.8)]
-            },  # map_id=1의 waypoint 정의 가능
-            2: {},  # map_id=2의 waypoint 정의 가능
-            3: {},  # map_id=3의 waypoint 정의 가능
+                (0, 1): [(-0.2, -2.0), (-2.4, -3.8), (-2.8, -3.0), (-3.0, -2.2)],               
+                (0, 2): [(-0.2, -2.0), (-1.2, -0.8), (-1.6, 0), (-2.2, 2.2)],
+                (0, 3): [(-0.2, -2.0), (-0.6, 0), (-0.4, 1.6), (0.2, 2.8)],
+                (0, 4): [(-0.2, -2.0), (0.8, -0.8), (4.2, -0.8), (4.2, 2.2)],
+                (0, 5): [(-0.2, -2.0), (0, -2)],
+                (0, 6): [(-0.2, -2.0), (1.4, -4.2), (2.8, -4.2)],
+
+                (1, 0): [(-3.0, -2.2), (-2.8, -3.0), (-2.4, -3.8), (-0.2, -2.0)],
+                (1, 2): [(-3.0, -2.2), (-2.8, -3.0), (-2.4, -3.8), (-1.6, -3.0), (-1.6, 0), (-2.2, 2.2)],
+                (1, 3): [(-3.0, -2.2), (-2.8, -3.0), (-2.4, -3.8), (-1.6, -3.0), (-0.6, 0), (-0.4, 1.6), (0.2, 2.8)],
+                (1, 4): [(-3.0, -2.2), (-2.8, -3.0), (-2.4, -3.8), (-1.6, -3.0), (-0.6, -0.8), (4.2, -0.8), (4.2, 2.2)],
+                (1, 5): [(-3.0, -2.2), (-2.8, -3.0), (-2.4, -3.8), (0, -2)],
+                (1, 6): [(-3.0, -2.2), (-2.8, -3.0), (-2.4, -3.8), (-1.6, -3.0), (2.8, -4.2)],
+                            
+                (2, 0): [(-2.2, 2.2), (-1.6, 0), (-0.2, -2.0)],			
+                (2, 1): [(-2.2, 2.2), (-1.6, 0), (-1.6, -3.0), (-2.4, -3.8), (-2.8, -3.0), (-3.0, -2.2)],
+                (2, 3): [(-2.2, 2.2), (-1.6, 0), (-1.2, -0.8), (-0.6, 0), (-0.4, 1.6), (0.2, 2.8)],
+                (2, 4): [(-2.2, 2.2), (-1.6, 0), (-1.2, -0.8), (4.2, -0.8), (4.2, 2.2)],
+                (2, 5): [(-2.2, 2.2), (-1.6, 0), (0, -2)],
+                (2, 6): [(-2.2, 2.2), (-1.6, 0), (1.4, -4.2), (2.8, -4.2)],			
+                    
+                (3, 0): [(0.2, 2.8), (-0.4, 1.6), (-0.6, 0), (-0.2, -2.0)],	
+                (3, 1): [(0.2, 2.8), (-0.4, 1.6), (-0.6, 0), (-1.6, -3.0), (-2.4, -3.8), (-2.8, -3.0), (-3.0, -2.2)],
+                (3, 2): [(0.2, 2.8), (-0.4, 1.6), (-0.6, 0), (-1.2, -0.8), (-1.6, 0), (-2.2, 2.2)],
+                (3, 4): [(0.2, 2.8), (-0.4, 1.6), (-0.6, 0), (-0.6, -0.8), (4.2, -0.8), (4.2, 2.2)],
+                (3, 5): [(0.2, 2.8), (-0.4, 1.6), (-0.6, 0), (0, -2)],
+                (3, 6): [(0.2, 2.8), (-0.4, 1.6), (-0.6, 0), (1.4, -4.2), (2.8, -4.2)],
+
+                (4, 0): [(4.2, 2.2), (4.2, -0.8), (0.8, -0.8), (-0.2, -2.0)],
+                (4, 1): [(4.2, 2.2), (4.2, -0.8), (0.8, -0.8), (-2.4, -3.8), (-2.8, -3.0), (-3.0, -2.2)],
+                (4, 2): [(4.2, 2.2), (4.2, -0.8), (-1.2, -0.8), (-1.6, 0), (-2.2, 2.2)],
+                (4, 3): [(4.2, 2.2), (4.2, -0.8), (-0.6, -0.8), (-0.6, 0), (-0.4, 1.6), (0.2, 2.8)],
+                (4, 5): [(4.2, 2.2), (4.2, -0.8), (0.8, -0.8), (0, -2)],
+                (4, 6): [(4.2, 2.2), (4.2, -0.8), (2.8, -0.8), (2.8, -4.2)],
+
+                (5, 0): [(0, -2), (-0.2, -2.0)],
+                (5, 1): [(0, -2), (-2.4, -3.8), (-2.8, -3.0), (-3.0, -2.2)],               
+                (5, 2): [(0, -2), (-1.2, -0.8), (-1.6, 0), (-2.2, 2.2)],
+                (5, 3): [(0, -2), (-0.6, 0), (-0.4, 1.6), (0.2, 2.8)],
+                (5, 4): [(0, -2), (0.8, -0.8), (4.2, -0.8), (4.2, 2.2)],
+                (5, 6): [(0, -2), (1.4, -4.2), (2.8, -4.2)],
+            },
+            2: {},
+            3: {},
         }
 
         map_reference_waypoints = reference_waypoints[map_id]
@@ -973,6 +1016,39 @@ class Agent:
 
         return linear_velocity, angular_velocity
 
+    def localizer(self, delta_distance, delta_yaw, scan_ranges):
+        """
+        Localization by Particle Filter
+        """
+        # Basic
+        #x, y, yaw = self.current_robot_pose
+
+        #new_x = x + delta_distance * math.cos(yaw)
+        #new_y = y + delta_distance * math.sin(yaw)
+        #new_yaw = (yaw + delta_yaw + math.pi) % (2 * math.pi) - math.pi
+        #x_error = new_x - self.true_robot_pose[0]
+        #y_error = new_y - self.true_robot_pose[1]
+        #distance_error_ = math.hypot(x_error, y_error)
+
+        # self.current_robot_pose = (new_x, new_y, new_yaw)
+
+        # Localization by Particle Filter
+        self.particle_filter.update_particles_by_motion_model(delta_distance, delta_yaw)
+        self.particle_filter.update_weights_by_measurement_model(
+            scan_ranges=scan_ranges,
+            occupancy_grid_map=self.occupancy_grid_map,
+            distance_map=self.distance_map
+        )
+        estimated_x, estimated_y, estimated_yaw = self.particle_filter.estimate_robot_pose()
+        self.current_robot_pose = (estimated_x, estimated_y, estimated_yaw)
+        self.particle_filter.resample_particles()
+
+        # Print error
+        if False:
+            dx = self.current_robot_pose[0] - self.true_robot_pose[0]
+            dy = self.current_robot_pose[1] - self.true_robot_pose[1]
+            distance_error = math.hypot(dx, dy)
+            self.log(f"PF Error: {distance_error:.3f}")
 
     # Main Logic
     def finite_state_machine(self,
@@ -1102,7 +1178,7 @@ class Agent:
                 self.tmp_target_position = self.waypoints[0]
 
             # CLEANING -> NAVIGATING
-            elif air_sensor_pollution_data[self.optimal_next_node_index] == 0 and optimal_visit_order != None:       # 청정 완료함
+            elif air_sensor_pollution_data[self.optimal_next_node_index] < 0.1 and optimal_visit_order != None:       # 청정 완료함
                 next_fsm_state = FSM_NAVIGATING
 
                 # 꼭 이때 해야 할까?
@@ -1134,123 +1210,3 @@ class Agent:
         self.log(f"{current_time:.1f}: {current_fsm_state}")
 
         return next_fsm_state, action
-
-# ----------------------------------------------------------------------------------------------------
-# import os
-# from self_drive_sim.simulation.floor_map import FloorMap
-
-# def print_global_map(map_path, is_coordinate=True, step=5):
-#     """
-#     주어진 FloorMap 파일을 읽고, 터미널용 맵을 출력합니다.
-#     - 벽: '#'
-#     - 빈 공간: '.'
-#     - 방 ID: 0-9, 10-15 -> A-F (16진수)
-#     - 스테이션: 'D'
-#     - 좌표계: 상단(y), 좌측(x) 5단위 표시
-
-#     using method ---
-
-#     map_file = './../../worlds/map2.npz'
-#     print_global_map(map_file, step=5)
-
-#     """
-#     # Generate FloorMap
-#     if not os.path.exists(map_path):
-#         raise FileNotFoundError(f"Map file not found: {map_path}")
-#     floor_map = FloorMap.from_file(map_path)
-
-#     # Generate Mapinfo
-#     pollution_end_time = 10.0
-#     station_pos = floor_map.station_pos
-#     starting_angle = 0.0
-#     map_info = floor_map.to_map_info(pollution_end_time, station_pos, starting_angle)
-
-#     wall_grid = map_info.wall_grid
-#     station_pos = map_info.station_pos
-
-#     height, width = wall_grid.shape
-#     grid_display = np.full((height, width), '0', dtype=str)  # 빈 공간은 '.'
-
-#     # 벽 표시
-#     grid_display[wall_grid] = '1'
-
-#     # Room ID (0-9, 10-15 -> A-F)
-#     def room_id_to_char(room_id):
-#         if room_id < 10:
-#             return str(room_id)
-#         else:
-#             return chr(ord('A') + (room_id - 10) % 6)  # 10->A, 11->B ... 15->F, 16->A 반복
-
-#     for room_id in range(map_info.num_rooms):
-#         cells = map_info.get_cells_in_room(room_id)
-#         char = room_id_to_char(room_id)
-#         for x, y in cells:
-#             # 벽이나 스테이션이 아니면 덮어쓰기
-#             if grid_display[x, y] not in ('#', 'D', 'O', 'S'):
-#                 grid_display[x, y] = '0'
-
-#     # Station
-#     gx, gy = map_info.pos2grid(station_pos)
-#     row = int(gx)
-#     col = int(gy)
-#     if 0 <= row < height and 0 <= col < width:
-#         grid_display[row, col] = '0'
-
-#     # Origin (grid 좌표 그대로 사용)
-#     # ox, oy = map_info.grid_origin
-#     # ox, oy = int(ox), int(oy)
-#     # if 0 <= ox < height and 0 <= oy < width:
-#     #     grid_display[ox, oy] = 'O'
-
-#     # Starting position (world → grid 변환 필요)
-#     if (map_info.height == 30 and map_info.width == 40):    # Map0
-#         sx, sy = map_info.pos2grid((2.0, 0.0))
-#     elif (map_info.height == 50 and map_info.width == 50):  # Map1
-#         sx, sy = map_info.pos2grid((0.0, -2.0))
-#     elif (map_info.height == 75 and map_info.width == 75):  # Map2
-#         sx, sy = map_info.pos2grid((3.0, 3.0))
-#     elif (map_info.height == 80 and map_info.width == 100): # Map3
-#         sx, sy = map_info.pos2grid((-7.2, 5.0))
-#     sx, sy = int(sx), int(sy)
-#     if 0 <= sx < height and 0 <= sy < width:
-#         grid_display[sx, sy] = '0'
-
-#     # Print
-#     if is_coordinate: # Map with coordinate
-#         y_labels = "  _|"
-
-#         # Y
-#         for j in range(0, width, step):
-#             label = f"{int(j-width/2):<{step-1}}|"
-#             y_labels += label
-#         y_labels += 'Y'
-#         print(y_labels)
-
-#         # X
-#         x_center = height // 2
-
-#         for i in range(height):
-#             x_val = i - x_center
-
-#             # x축 레이블: 숫자만, 공백 없음
-#             if i % step == 0:
-#                 x_label = f"{x_val:>3} "  # 3칸 폭 안에서 숫자 정렬
-#             elif (i + 1) % step == 0:
-#                 x_label = "  _ "          # 구분선 3칸
-#             else:
-#                 x_label = "    "          # 나머지 공백 3칸
-
-#             map_row = ''.join(grid_display[i, :])
-#             line = x_label + map_row
-#             print(line)
-#         print('  X')
-
-            
-#     else: # Map without coordinate
-#         for i in range(height):
-#             line = ''.join(grid_display[i, :])
-#             print(line)
-
-# if __name__ == '__main__':
-#     map_file = './../../worlds/map1.npz'
-#     print_global_map(map_file, is_coordinate=True, step=5)
