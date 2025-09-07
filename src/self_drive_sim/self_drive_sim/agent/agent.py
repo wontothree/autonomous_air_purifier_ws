@@ -397,7 +397,7 @@ class ParticleFilter:
         squared_delta_distance = delta_distance * delta_distance
         squared_delta_yaw = delta_yaw * delta_yaw
         std_dev_distance = math.sqrt(self.odom_noise[0] * squared_delta_distance + self.odom_noise[1] * squared_delta_yaw)
-        std_dev_yaw = math.sqrt(self.odom_noise[2] * squared_delta_distance + self.odom_noise[2] * squared_delta_yaw)
+        std_dev_yaw = math.sqrt(self.odom_noise[2] * squared_delta_distance + self.odom_noise[3] * squared_delta_yaw)
 
         for particle in self.particle_set:
             noisy_delta_distance = delta_distance + np.random.normal(0, std_dev_distance)
@@ -448,9 +448,8 @@ class ParticleFilter:
         -----
         - self.particle_num
         """   
-        def world_to_grid_coordinate(x_world, y_world, origin_x=map_origin[0], origin_y=map_origin[1], resolution=map_resolution):
-            x_grid = int(round(origin_x + x_world / resolution))
-            y_grid = int(round(origin_y + y_world / resolution))
+        def world2grid(x_world, y_world):
+            x_grid, y_grid = x_world, y_world
             return x_grid, y_grid
 
         eps = 1e-12
@@ -465,6 +464,7 @@ class ParticleFilter:
         
         # Map constant
         map_height, map_width = occupancy_grid_map.shape
+        map_origin_x, map_origin_y = map_origin
         
         # Initialize particle weight
         log_weights = np.zeros(self.particle_num, dtype=np.float64)
@@ -505,11 +505,12 @@ class ParticleFilter:
                 lidar_hit_y = particle_y + range_measurement * direction_y
                 
                 # Index
-                map_index_x, map_index_y = world_to_grid_coordinate(lidar_hit_x, lidar_hit_y)
+                map_index_x = int(round((lidar_hit_x - map_origin_x) / map_resolution))
+                map_index_y = int(round((lidar_hit_y - map_origin_y) / map_resolution))
                 
                 if 0 <= map_index_x < map_width and 0 <= map_index_y < map_height:
                     distance_in_cells = distance_map[map_index_y, map_index_x]
-                    distance_in_meters = float(distance_in_cells) * map_resolution
+                    distance_in_meters = float(distance_in_cells)
                     
                     prob_hit = math.exp( -(distance_in_meters ** 2) * inv_denominator)
                     total_prob = z_hit * prob_hit + z_rand * (1.0 / max_range)
@@ -603,12 +604,13 @@ class Agent:
 
         self.current_robot_pose = (0, 0, 0)
         self.true_robot_pose = (0, 0, 0)
+        self.distance_error = 0
 
         # Map
         self.map_id = None
         self.room_num = None
         self.map_origin = None
-        self.resolution = 0.01
+        self.resolution = 0.02
 
         # Finite state machine
         self.current_fsm_state = "READY"
@@ -672,21 +674,25 @@ class Agent:
             self.room_num = 2
             self.map_origin = (14 * scale, 20 * scale)
             map = self.map_obj.ORIGINAL_STRING_MAP0
+            self.current_node_index = 2
         elif map_info.num_rooms == 5: 
             self.map_id = 1
             self.room_num = 5
             self.map_origin = (25 * scale, 25 * scale)
             map = self.map_obj.ORIGINAL_STRING_MAP1
+            self.current_node_index = 5
         elif map_info.num_rooms == 8:
             self.map_id = 2
             self.room_num = 8
             self.map_origin = (37 * scale, 37 * scale)
             map = self.map_obj.ORIGINAL_STRING_MAP2
+            self.current_node_index = 8
         elif map_info.num_rooms == 13:
             self.map_id = 3
             self.room_num = 13
             self.map_origin = (40 * scale, 50 * scale)
             map = self.map_obj.ORIGINAL_STRING_MAP3
+            self.current_node_index = 13
 
         # Finite state machine
         self.current_fsm_state = "READY"
@@ -726,36 +732,36 @@ class Agent:
         """
 
         # --------------------------------------------------
-        # # Observation
-        # # pollution data
-        # air_sensor_pollution_data = observation['air_sensor_pollution']
-        # robot_sensor_pollution_data =  observation['sensor_pollution']
-        # pollution_end_time = self.pollution_end_time
-        # # IMU data
-        # delta_distance = np.linalg.norm(observation["disp_position"])
-        # delta_yaw = observation['disp_angle']
-        # # LiDAR data
-        # scan_ranges = observation['sensor_lidar_front']
+        # Observation
+        # pollution data
+        air_sensor_pollution_data = observation['air_sensor_pollution']
+        robot_sensor_pollution_data =  observation['sensor_pollution']
+        pollution_end_time = self.pollution_end_time
+        # IMU data
+        delta_distance = np.linalg.norm(observation["disp_position"])
+        delta_yaw = observation['disp_angle']
+        # LiDAR data
+        scan_ranges = observation['sensor_lidar_front']
 
-        # # Localization
-        # self.localizer(delta_distance, delta_yaw, scan_ranges, self.occupancy_grid_map, self.distance_map)
-        # current_robot_pose = self.current_robot_pose
+        # Localization
+        self.localizer(delta_distance, delta_yaw, scan_ranges, self.occupancy_grid_map, self.distance_map)
+        current_robot_pose = self.current_robot_pose
 
-        # # Current time
-        # dt = 0.1
-        # current_time = self.steps * dt
+        # Current time
+        dt = 0.1
+        current_time = self.steps * dt
 
-        # next_state, action = self.finite_state_machine(
-        #     air_sensor_pollution_data,
-        #     robot_sensor_pollution_data,
-        #     current_time,
-        #     pollution_end_time,
-        #     current_robot_pose,
-        #     self.current_fsm_state,
-        #     self.map_id,
-        #     self.room_num
-        # )
-        # self.current_fsm_state = next_state 
+        next_state, action = self.finite_state_machine(
+            air_sensor_pollution_data,
+            robot_sensor_pollution_data,
+            current_time,
+            pollution_end_time,
+            current_robot_pose,
+            self.current_fsm_state,
+            self.map_id,
+            self.room_num
+        )
+        self.current_fsm_state = next_state 
         # --------------------------------------------------
 
         # --------------------------------------------------
@@ -763,7 +769,7 @@ class Agent:
         # ------- 여기만 테스트 하세요 아빠 -------------------
         # --------------------------------------------------
         # --------------------------------------------------
-        action = self.move_along_path(1, 2, self.map_id)
+        # action = self.move_along_path(1, 2, self.map_id)
         # --------------------------------------------------
         # --------------------------------------------------
         # --------------------------------------------------
@@ -868,7 +874,7 @@ class Agent:
         ]
 
         if not observed_polluted_regions:
-            return
+            return []
 
         distance_matrix = distance_matrices.get(map_id) 
         dock_station_id = len(distance_matrix) - 1  # 마지막 인덱스가 도킹 스테이션
@@ -914,47 +920,47 @@ class Agent:
                 (2, 1): [(0.2, 1.6), (-0.8, 1.6), (-1, -2)],
             },
             1: {
-                (0, 1): [(-0.2, -2.0), (-2.4, -3.8), (-2.8, -3.0), (-3.0, -2.2)],               
-                (0, 2): [(-0.2, -2.0), (-1.2, -0.8), (-1.6, 0), (-2.2, 2.2)],
-                (0, 3): [(-0.2, -2.0), (-0.6, 0), (-0.4, 1.6), (0.2, 2.8)],
+                (0, 1): [(-0.2, -2.0), (-1.6, -3.4), (-2.8, -3.4), (-2.8, -2.2)],               
+                (0, 2): [(-0.2, -2.0), (-1.6, -0.8), (-1.6, 0.8), (-2.2, 2.4)],
+                (0, 3): [(-0.2, -2.0), (-0.6, 0.8), (1.0, 0.8), (1.0, 2.8)],
                 (0, 4): [(-0.2, -2.0), (0.8, -0.8), (4.2, -0.8), (4.2, 2.2)],
                 (0, 5): [(-0.2, -2.0), (0, -2)],
-                (0, 6): [(-0.2, -2.0), (1.4, -4.2), (2.8, -4.2)],
+                (0, 6): [(-0.2, -2.0), (0.8, -3.8), (2.8, -4.2)],
 
-                (1, 0): [(-3.0, -2.2), (-2.8, -3.0), (-2.4, -3.8), (-0.2, -2.0)],
-                (1, 2): [(-3.0, -2.2), (-2.8, -3.0), (-2.4, -3.8), (-1.6, -3.0), (-1.6, 0), (-2.2, 2.2)],
-                (1, 3): [(-3.0, -2.2), (-2.8, -3.0), (-2.4, -3.8), (-1.6, -3.0), (-0.6, 0), (-0.4, 1.6), (0.2, 2.8)],
-                (1, 4): [(-3.0, -2.2), (-2.8, -3.0), (-2.4, -3.8), (-1.6, -3.0), (-0.6, -0.8), (4.2, -0.8), (4.2, 2.2)],
-                (1, 5): [(-3.0, -2.2), (-2.8, -3.0), (-2.4, -3.8), (0, -2)],
-                (1, 6): [(-3.0, -2.2), (-2.8, -3.0), (-2.4, -3.8), (-1.6, -3.0), (2.8, -4.2)],
+                (1, 0): [(-2.8, -2.2), (-2.8, -3.4), (-1.6, -3.4), (-0.2, -2.0)],
+                (1, 2): [(-2.8, -2.2), (-2.8, -3.4), (-1.6, -3.4), (-1.6, -0.8), (-1.6, 0.8), (-2.2, 2.4)],
+                (1, 3): [(-2.8, -2.2), (-2.8, -3.4), (-1.6, -3.4), (-0.6, -0.8), (-0.6, 0.8), (1.0, 0.8), (1.0, 2.8)],
+                (1, 4): [(-2.8, -2.2), (-2.8, -3.4), (-1.6, -3.4), (0.8, -0.8), (4.2, -0.8), (4.2, 2.2)],
+                (1, 5): [(-2.8, -2.2), (-2.8, -3.4), (-1.6, -3.4), (0, -2)],
+                (1, 6): [(-2.8, -2.2), (-2.8, -3.4), (-1.6, -3.4), (0.8, -3.8), (2.8, -4.2)],
                             
-                (2, 0): [(-2.2, 2.2), (-1.6, 0), (-0.2, -2.0)],			
-                (2, 1): [(-2.2, 2.2), (-1.6, 0), (-1.6, -3.0), (-2.4, -3.8), (-2.8, -3.0), (-3.0, -2.2)],
-                (2, 3): [(-2.2, 2.2), (-1.6, 0), (-1.2, -0.8), (-0.6, 0), (-0.4, 1.6), (0.2, 2.8)],
-                (2, 4): [(-2.2, 2.2), (-1.6, 0), (-1.2, -0.8), (4.2, -0.8), (4.2, 2.2)],
-                (2, 5): [(-2.2, 2.2), (-1.6, 0), (0, -2)],
-                (2, 6): [(-2.2, 2.2), (-1.6, 0), (1.4, -4.2), (2.8, -4.2)],			
+                (2, 0): [(-2.2, 2.4), (-1.6, 0.8), (-1.6, -0.8), (-0.2, -2.0)],			
+                (2, 1): [(-2.2, 2.4), (-1.6, 0.8), (-1.6, -0.8), (-1.6, -3.4), (-2.8, -3.4), (-2.8, -2.2)],
+                (2, 3): [(-2.2, 2.4), (-1.6, 0.8), (-1.6, -0.8), (-0.6, -0.8), (-0.6, 0.8), (1.0, 0.8), (1.0, 2.8)],
+                (2, 4): [(-2.2, 2.4), (-1.6, 0.8), (-1.6, -0.8), (4.2, -0.8), (4.2, 2.2)],
+                (2, 5): [(-2.2, 2.4), (-1.6, 0.8), (-1.6, -0.8), (0, -2)],
+                (2, 6): [(-2.2, 2.4), (-1.6, 0.8), (-1.6, -0.8), (0.8, -3.8), (2.8, -4.2)],			
                     
-                (3, 0): [(0.2, 2.8), (-0.4, 1.6), (-0.6, 0), (-0.2, -2.0)],	
-                (3, 1): [(0.2, 2.8), (-0.4, 1.6), (-0.6, 0), (-1.6, -3.0), (-2.4, -3.8), (-2.8, -3.0), (-3.0, -2.2)],
-                (3, 2): [(0.2, 2.8), (-0.4, 1.6), (-0.6, 0), (-1.2, -0.8), (-1.6, 0), (-2.2, 2.2)],
-                (3, 4): [(0.2, 2.8), (-0.4, 1.6), (-0.6, 0), (-0.6, -0.8), (4.2, -0.8), (4.2, 2.2)],
-                (3, 5): [(0.2, 2.8), (-0.4, 1.6), (-0.6, 0), (0, -2)],
-                (3, 6): [(0.2, 2.8), (-0.4, 1.6), (-0.6, 0), (1.4, -4.2), (2.8, -4.2)],
+                (3, 0): [(1.0, 2.8), (1.0, 0.8), (-0.6, 0.8), (-0.6, -0.8), (-0.2, -2.0)],	
+                (3, 1): [(1.0, 2.8), (1.0, 0.8), (-0.6, 0.8), (-0.6, -0.8), (-1.6, -3.4), (-2.8, -3.4), (-2.8, -2.2)],
+                (3, 2): [(1.0, 2.8), (1.0, 0.8), (-0.6, 0.8), (-0.6, -0.8), (-1.6, -0.8), (-1.6, 0.8), (-2.2, 2.4)],
+                (3, 4): [(1.0, 2.8), (1.0, 0.8), (-0.6, 0.8), (-0.6, -0.8), (4.2, -0.8), (4.2, 2.2)],
+                (3, 5): [(1.0, 2.8), (1.0, 0.8), (-0.6, 0.8), (-0.6, -0.8), (0, -2)],
+                (3, 6): [(1.0, 2.8), (1.0, 0.8), (-0.6, 0.8), (-0.6, -0.8), (0.8, -3.8), (2.8, -4.2)],
 
                 (4, 0): [(4.2, 2.2), (4.2, -0.8), (0.8, -0.8), (-0.2, -2.0)],
-                (4, 1): [(4.2, 2.2), (4.2, -0.8), (0.8, -0.8), (-2.4, -3.8), (-2.8, -3.0), (-3.0, -2.2)],
-                (4, 2): [(4.2, 2.2), (4.2, -0.8), (-1.2, -0.8), (-1.6, 0), (-2.2, 2.2)],
-                (4, 3): [(4.2, 2.2), (4.2, -0.8), (-0.6, -0.8), (-0.6, 0), (-0.4, 1.6), (0.2, 2.8)],
+                (4, 1): [(4.2, 2.2), (4.2, -0.8), (0.8, -0.8), (-1.6, -3.4), (-2.8, -3.4), (-2.8, -2.2)],
+                (4, 2): [(4.2, 2.2), (4.2, -0.8), (-1.6, -0.8), (-1.6, 0.8), (-2.2, 2.4)],
+                (4, 3): [(4.2, 2.2), (4.2, -0.8), (-0.6, -0.8), (-0.6, 0.8), (1.0, 0.8), (1.0, 2.8)],
                 (4, 5): [(4.2, 2.2), (4.2, -0.8), (0.8, -0.8), (0, -2)],
                 (4, 6): [(4.2, 2.2), (4.2, -0.8), (2.8, -0.8), (2.8, -4.2)],
 
                 (5, 0): [(0, -2), (-0.2, -2.0)],
-                (5, 1): [(0, -2), (-2.4, -3.8), (-2.8, -3.0), (-3.0, -2.2)],               
-                (5, 2): [(0, -2), (-1.2, -0.8), (-1.6, 0), (-2.2, 2.2)],
-                (5, 3): [(0, -2), (-0.6, 0), (-0.4, 1.6), (0.2, 2.8)],
+                (5, 1): [(0, -2), (-1.6, -3.4), (-2.8, -3.4), (-2.8, -2.2)],               
+                (5, 2): [(0, -2), (-1.6, -0.8), (-1.6, 0.8), (-2.2, 2.4)],
+                (5, 3): [(0, -2), (-0.6, -0.8), (-0.6, 0.8), (1.0, 0.8), (1.0, 2.8)],
                 (5, 4): [(0, -2), (0.8, -0.8), (4.2, -0.8), (4.2, 2.2)],
-                (5, 6): [(0, -2), (1.4, -4.2), (2.8, -4.2)],
+                (5, 6): [(0, -2), (0.8, -3.8), (2.8, -4.2)],
             },
             2: {
                 (0, 1): [(3.8, 1.8), (-1.0, 1.6), (-2.4, 2.4), (-2.4, 4.8)],               
@@ -1132,9 +1138,9 @@ class Agent:
 
             dx = self.current_robot_pose[0] - self.true_robot_pose[0]
             dy = self.current_robot_pose[1] - self.true_robot_pose[1]
-            distance_error = math.hypot(dx, dy)
-            if distance_error > self.max_localization_error: self.max_localization_error = distance_error
-            self.log(f"PF Error: {distance_error:.3f}, MAX Error: {self.max_localization_error}")
+            self.distance_error = math.hypot(dx, dy)
+            if self.distance_error > self.max_localization_error: self.max_localization_error = self.distance_error
+            # self.log(f"PF Error: {self.distance_error:.3f}")
 
     # Main Logic
     def finite_state_machine(self,
@@ -1145,7 +1151,8 @@ class Agent:
             current_robot_pose, 
             current_fsm_state,
             map_id,
-            room_num 
+            room_num,
+            pollution_threshold=0.05 
             ):
         """
         current_fsm_state -> next_fsm_state, action
@@ -1198,7 +1205,7 @@ class Agent:
 
             # State transition
             # READY -> NAVIGATING
-            if optimal_visit_order != None: # 목표 구역이 있음
+            if optimal_visit_order: # 목표 구역이 있음
                 next_fsm_state = FSM_NAVIGATING
                 self.optimal_next_node_index = optimal_visit_order[0]
                 self.waypoints = self.global_planner(start_node_index=initial_node_index, end_node_index=self.optimal_next_node_index, map_id=map_id)
@@ -1257,7 +1264,7 @@ class Agent:
                 self.tmp_target_position = self.waypoints[0]
 
             # CLEANING -> NAVIGATING
-            elif air_sensor_pollution_data[self.optimal_next_node_index] < 0.01 and optimal_visit_order != None:       # 청정 완료함
+            elif optimal_visit_order and air_sensor_pollution_data[self.optimal_next_node_index] < pollution_threshold:       # 청정 완료함
                 next_fsm_state = FSM_NAVIGATING
 
                 # 꼭 이때 해야 할까?
@@ -1285,8 +1292,14 @@ class Agent:
                 self.current_waypoint_index += 1
                 self.tmp_target_position = self.waypoints[self.current_waypoint_index]
 
+
         # log
-        self.log(f"{current_time:.1f}: {current_fsm_state}")
+        if current_fsm_state == FSM_NAVIGATING:
+            self.log(f"[{current_time:.1f}] [NAVIGATING] {self.current_node_index} -> {self.optimal_next_node_index} | PF Error: {self.distance_error:.3f}")
+        elif current_fsm_state == FSM_CLEANING:
+            self.log(f"[{current_time:.1f}] [CLEANING] {air_sensor_pollution_data[self.current_node_index]:.3f} | PF Error: {self.distance_error:.3f}")
+        else:
+            self.log(f"[{current_time:.1f}] [{current_fsm_state}] | PF Error: {self.distance_error:.3f}")
 
         return next_fsm_state, action
 
