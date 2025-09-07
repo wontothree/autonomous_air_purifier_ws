@@ -599,14 +599,14 @@ class Agent:
         self.logger = logger
         self.steps = 0
 
-        self.current_robot_pose = (0.0, 0.0, 0.0)
-        self.true_robot_pose = (0.0, 0.0, 0.0)
+        self.current_robot_pose = (None, None, None)
+        self.true_robot_pose = (None, None, None)
 
         # Map
         self.map_id = None
         self.room_num = None
         self.map_origin = None
-        self.resolution = 0.05
+        self.resolution = 0.01
 
         # Finite state machine
         self.current_fsm_state = "READY"
@@ -627,7 +627,7 @@ class Agent:
         self.current_waypoint_index = 0
         self.tmp_start_node = 8
         self.tmp_end_node = 7
-
+        self.max_localization_error = 0
 
     def initialize_map(self, map_info: MapInfo):
         """
@@ -819,7 +819,8 @@ class Agent:
             robot_sensor_pollution_data, 
             current_node_index,
             map_id,
-            pollution_threshold=0.01
+            room_num,
+            pollution_threshold=0.05
             ):
         """
         미션 플래너: 오염 감지된 방들을 기반으로 TSP 순서에 따라 task queue 생성
@@ -833,10 +834,6 @@ class Agent:
         Return
         ------
         - best_path: List[int], 방문해야 할 방의 순서
-
-        Using
-        -----
-        - self.room_num
         """
         distance_matrices = {
             0: [
@@ -862,7 +859,7 @@ class Agent:
 
         # Polluted regions
         observed_polluted_regions = [
-            room_id for room_id in range(self.room_num)
+            room_id for room_id in range(room_num)
             if air_sensor_pollution_data[room_id] > pollution_threshold
         ]
 
@@ -1121,10 +1118,19 @@ class Agent:
 
         # Print error
         if True:
+            if (
+                self.true_robot_pose is None 
+                or self.current_robot_pose is None
+                or None in self.true_robot_pose
+                or None in self.current_robot_pose
+            ):
+                return
+
             dx = self.current_robot_pose[0] - self.true_robot_pose[0]
             dy = self.current_robot_pose[1] - self.true_robot_pose[1]
             distance_error = math.hypot(dx, dy)
-            self.log(f"PF Error: {distance_error:.3f}")
+            if distance_error > self.max_localization_error: self.max_localization_error = distance_error
+            self.log(f"PF Error: {distance_error:.3f}, MAX Error: {self.max_localization_error}")
 
     # Main Logic
     def finite_state_machine(self,
@@ -1134,14 +1140,11 @@ class Agent:
             pollution_end_time,
             current_robot_pose, 
             current_fsm_state,
-            map_id 
+            map_id,
+            room_num 
             ):
         """
         current_fsm_state -> next_fsm_state, action
-
-        Using
-        -----
-        - self.room_num
         """
         # Define states of finite state machine
         FSM_READY = "READY"
@@ -1150,8 +1153,8 @@ class Agent:
         FSM_RETURNING = "RETURNING"
 
         # Indexes of initial node and docking station node by map
-        initial_node_index = self.room_num
-        docking_station_node_index = self.room_num + 1
+        initial_node_index = room_num
+        docking_station_node_index = room_num + 1
 
         def calculate_distance_to_target_position(current_position, target_position):
             """
@@ -1185,7 +1188,8 @@ class Agent:
                 air_sensor_pollution_data, 
                 robot_sensor_pollution_data, 
                 current_node_index=initial_node_index,
-                map_id=map_id
+                map_id=map_id,
+                room_num=room_num
                 )
 
             # State transition
@@ -1235,7 +1239,8 @@ class Agent:
                 air_sensor_pollution_data, 
                 robot_sensor_pollution_data, 
                 current_node_index=self.current_node_index,
-                map_id=map_id
+                map_id=map_id,
+                room_num=room_num
                 )          
 
             # State transition
@@ -1280,6 +1285,7 @@ class Agent:
         self.log(f"{current_time:.1f}: {current_fsm_state}")
 
         return next_fsm_state, action
+
 
     def move_along_path(self, start_node, end_node, map_id, distance_threshold=0.1):
         """
