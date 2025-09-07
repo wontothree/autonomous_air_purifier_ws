@@ -4,7 +4,7 @@ import math
 import numpy as np
 import itertools
 from dataclasses import dataclass, field
-from scipy.ndimage import distance_transform_edt
+from scipy.ndimage import distance_transform_edt, zoom
 
 class Map:
     ORIGINAL_STRING_MAP0 = """
@@ -253,52 +253,28 @@ class Map:
 1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111
 1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111
 """
-        
-    def make_string_distance_map(self, string_map: str) -> str:
-        """
-        Generate a distance map from string occupancy map and return as hex string.
-        Each cell contains distance to nearest obstacle (0-9, A-F for 10-15).
-        """
-        # 1. String -> numpy array
-        occupancy_grid = self.string_to_numpy_array_map(string_map)
-        
-        # 2. Distance transform (0=obstacle, 1=free)
-        distance_map = distance_transform_edt(occupancy_grid == 0)
-        
-        # 3. Clip distances to 15 (hex F)
-        distance_map_clipped = np.clip(distance_map.astype(int), 0, 15)
-        
-        # 4. Convert to hex string
-        def num_to_hex_char(n):
-            if n < 10:
-                return str(n)
-            else:
-                return chr(ord('A') + n - 10)
-        
-        lines = ["".join(num_to_hex_char(val) for val in row) for row in distance_map_clipped]
-        return "\n".join(lines)
-
-    
-    def string_to_numpy_array_map(self, string_map: str) -> np.ndarray:
-        """
-        Multiline string map ('1'=obstacle, '0'=free) -> 2D numpy array
-        """
-        # 문자열을 '\n'으로 split, 공백 제거, 바로 numpy로 변환
+  
+    def string_to_np_array_map(self, string_map: str) -> np.ndarray:
         return np.array([list(map(int, line)) 
                         for line in string_map.strip().splitlines() 
                         if line.strip()], dtype=np.int8)
+        
+    def np_array_to_string_map(self, array_map: np.ndarray) -> str:
+        lines = ["".join(map(str, row)) for row in array_map]
+        return "\n".join(lines)
 
-    def occupancy_grid_to_distance_map(self, occupancy_grid_map: np.ndarray, map_resolution: float = 0.2) -> np.ndarray:
-        """
-        occupancy grid (0=free, 1=obstacle) → distance map (numpy array, meter 단위)
-        """
-        # free cell (0)에 대해 거리 계산
+    def occupancy_grid_to_distance_map(self, occupancy_grid_map: np.ndarray, map_resolution: float) -> np.ndarray:
         dist_map = distance_transform_edt(occupancy_grid_map == 0)
-
-        # 셀 단위 → 실제 거리(m) 변환
         dist_map = dist_map * map_resolution
-
+        dist_map = np.round(dist_map, 2) 
         return dist_map
+
+    def upscale_occupancy_grid_map(self, occupancy_grid_map: np.ndarray, scale: int) -> np.ndarray:
+        if scale == 1:
+            return occupancy_grid_map.copy()
+        
+        upscaled_map = zoom(occupancy_grid_map, zoom=scale, order=0) 
+        return upscaled_map
 
 
 @dataclass
@@ -359,30 +335,29 @@ class ParticleFilter:
         odom_noise=[0.1, 0.01, 0.01, 0.1]
         ):
         
+        self.particle_set = []
         self.particle_num = particle_num
         self.initial_x_noise=initial_x_noise
         self.initial_y_noise=initial_y_noise
         self.initial_yaw_noise=initial_yaw_noise
         self.odom_noise = odom_noise
 
-        self.particle_set = []
-
     def initialize_particles(self, initial_pose: Pose):
         """
         Parameters
         ----------
-            - initial_pose: initial pose of robot (x, y, yaw)
+        - initial_pose: initial pose of robot (x, y, yaw)
 
         Update
         ------
-            - particle_set: particle (pose, weight) set
+        - particle_set: particle (pose, weight) set
         
         Using
         -----
-            - self.particle_num
-            - self.initial_x_noise
-            - self.initial_y_noise
-            - self.initial_yaw_noise
+        - self.particle_num
+        - self.initial_x_noise
+        - self.initial_y_noise
+        - self.initial_yaw_noise
         """
         # 벡터 연산으로 모든 파티클의 Pose 값을 한 번에 계산
         particle_x_set = initial_pose.x + np.random.normal(0, self.initial_x_noise, self.particle_num)
@@ -407,17 +382,17 @@ class ParticleFilter:
         """
         Parameters
         ----------
-            - delta_x: measured by IMU
-            - delta_y
-            - delta_yaw
+        - delta_x: measured by IMU
+        - delta_y
+        - delta_yaw
 
         Update
         ------
-            - self.particle_set
+        - self.particle_set
         
         Using
         -----
-            - odom_noise
+        - odom_noise
         """    
         # Standard deviation (noise)
         squared_delta_distance = delta_distance * delta_distance
@@ -444,16 +419,16 @@ class ParticleFilter:
         occupancy_grid_map: np.ndarray,
         distance_map: np.ndarray,
 
+        # Map
+        map_origin=(float, float),
+        map_resolution= float,
+
         # LiDAR
         min_angle=-1.9,
         angle_increment=0.016,
         min_range=0.05,
         max_range=8.0,
         scan_step=3, # or beam_sample_count
-        
-        # Map
-        map_origin=(14, 20),
-        map_resolution=0.2,
 
         sigma_hit=0.2,
         z_hit=0.95,
@@ -462,13 +437,17 @@ class ParticleFilter:
         """
         Parameters
         ----------
-            - scan
-            - occupancy_grid_map
-            - distance_map
+        - scan
+        - occupancy_grid_map
+        - distance_map
 
         Update
         ------
-            - self.particle_set
+        - self.particle_set
+
+        Using
+        -----
+        - self.particle_num
         """   
         eps = 1e-12
 
@@ -485,8 +464,7 @@ class ParticleFilter:
         map_origin_x, map_origin_y = map_origin
         
         # Initialize particle weight
-        particle_num = len(self.particle_set)
-        log_weights = np.zeros(particle_num, dtype=np.float64)
+        log_weights = np.zeros(self.particle_num, dtype=np.float64)
         
         # previous
         particle_yaws = np.array([particle.pose.yaw for particle in self.particle_set])
@@ -500,7 +478,7 @@ class ParticleFilter:
         cos_sampled_beam_angles = np.cos(sampled_beam_angles)
         sin_sampled_beam_angles = np.sin(sampled_beam_angles)
         
-        for particle_index in range(particle_num):
+        for particle_index in range(self.particle_num):
             particle_x = particle_xs[particle_index]
             particle_y = particle_ys[particle_index]
             cos_yaw = particle_cos_yaws[particle_index]
@@ -560,13 +538,13 @@ class ParticleFilter:
 
         Returns
         -------
-            - x: estimated x position
-            - y: estimated y position
-            - yaw: estimated orientation
+        - x: estimated x position
+        - y: estimated y position
+        - yaw: estimated orientation
 
-        Using
+        Update
         ------
-            - self.particle_set
+        - self.particle_set
         """        
         xs = np.array([particle.pose.x for particle in self.particle_set])
         ys = np.array([particle.pose.y for particle in self.particle_set])
@@ -587,12 +565,19 @@ class ParticleFilter:
     def resample_particles(self):
         """
         Low-variance resampling of particles based on their weights.
+
+        Update
+        ------
+        - self.particle_set
+
+        Using
+        -----
+        - self.particle_num
         """
-        particle_num = len(self.particle_set)
         weights = np.array([particle.weight for particle in self.particle_set])
         weights /= np.sum(weights)  # normalize
 
-        positions = (np.arange(particle_num) + np.random.uniform()) / particle_num
+        positions = (np.arange(self.particle_num) + np.random.uniform()) / self.particle_num
         cumulative_sum = np.cumsum(weights)
         indices = np.searchsorted(cumulative_sum, positions)
 
@@ -602,7 +587,7 @@ class ParticleFilter:
                 x=self.particle_set[i].pose.x,
                 y=self.particle_set[i].pose.y,
                 _yaw=self.particle_set[i].pose.yaw),
-                weight=1.0 / particle_num
+                weight=1.0 / self.particle_num
             )
             for i in indices
         ]
@@ -616,10 +601,15 @@ class Agent:
 
         self.current_robot_pose = (0.0, 0.0, 0.0)
         self.true_robot_pose = (0.0, 0.0, 0.0)
+
+        # Map
         self.map_id = None
+        self.room_num = None
+        self.map_origin = None
+        self.resolution = 0.05
 
         # Finite state machine
-        # self.current_fsm_state = "READY"
+        self.current_fsm_state = "READY"
         self.waypoints = []
         self.current_waypoint_index = 0
         self.tmp_target_position = None
@@ -676,16 +666,24 @@ class Agent:
         # Identify map
         if map_info.num_rooms == 2: 
             self.map_id = 0
-            map = Map.ORIGINAL_STRING_MAP0
+            self.room_num = 2
+            self.map_origin = (14, 20)
+            map = self.map_obj.ORIGINAL_STRING_MAP0
         elif map_info.num_rooms == 5: 
             self.map_id = 1
-            map = Map.ORIGINAL_STRING_MAP1
+            self.room_num = 5
+            self.map_origin = (25, 25)
+            map = self.map_obj.ORIGINAL_STRING_MAP1
         elif map_info.num_rooms == 8:
             self.map_id = 2
-            map = Map.ORIGINAL_STRING_MAP2
+            self.room_num = 8
+            self.map_origin = (37, 37)
+            map = self.map_obj.ORIGINAL_STRING_MAP2
         elif map_info.num_rooms == 13:
             self.map_id = 3
-            map = Map.ORIGINAL_STRING_MAP3
+            self.room_num = 13
+            self.map_origin = (40, 50)
+            map = self.map_obj.ORIGINAL_STRING_MAP3
 
         # Finite state machine
         self.current_fsm_state = "READY"
@@ -695,9 +693,10 @@ class Agent:
                             y=self.current_robot_pose[1],
                             _yaw=self.current_robot_pose[2])
         self.particle_filter.initialize_particles(initial_pose)
-
-        self.occupancy_grid_map = self.map_obj.string_to_numpy_array_map(map)
-        self.distance_map = self.map_obj.occupancy_grid_to_distance_map(self.occupancy_grid_map)
+        # Occupancy grid map and distance map
+        original_map = self.map_obj.string_to_np_array_map(map)
+        self.occupancy_grid_map = self.map_obj.upscale_occupancy_grid_map(original_map, 0.2 / self.resolution)
+        self.distance_map = self.map_obj.occupancy_grid_to_distance_map(self.occupancy_grid_map, map_resolution=self.resolution)
 
     def act(self, observation: Observation):
         """
@@ -736,7 +735,7 @@ class Agent:
         scan_ranges = observation['sensor_lidar_front']
 
         # Localization
-        self.localizer(delta_distance, delta_yaw, scan_ranges)
+        self.localizer(delta_distance, delta_yaw, scan_ranges, self.occupancy_grid_map, self.distance_map)
         current_robot_pose = self.current_robot_pose
 
         # Current time
@@ -826,13 +825,18 @@ class Agent:
         미션 플래너: 오염 감지된 방들을 기반으로 TSP 순서에 따라 task queue 생성
 
         Parameters:
-            - air_sensor_pollution_data: list of float, 각 방의 공기 센서 오염 수치
-            - robot_sensor_pollution_data: list of float, 로봇 센서 오염 수치 (현재 사용 안 함)
-            - current_node_index: int, 현재 방(room)의 ID
-            - map_id: 0, 1, 2, 3
+        - air_sensor_pollution_data: list of float, 각 방의 공기 센서 오염 수치
+        - robot_sensor_pollution_data: list of float, 로봇 센서 오염 수치 (현재 사용 안 함)
+        - current_node_index: int, 현재 방(room)의 ID
+        - map_id: 0, 1, 2, 3
 
-        Return:
-            - best_path: List[int], 방문해야 할 방의 순서
+        Return
+        ------
+        - best_path: List[int], 방문해야 할 방의 순서
+
+        Using
+        -----
+        - self.room_num
         """
         distance_matrices = {
             0: [
@@ -856,14 +860,9 @@ class Agent:
 
         unobserved_potential_regions = []
 
-        if map_id == 0: room_num = 2
-        elif map_id == 1: room_num = 5
-        elif map_id == 2: room_num = 8
-        elif map_id == 3: room_num = 13
-
         # Polluted regions
         observed_polluted_regions = [
-            room_id for room_id in range(room_num)
+            room_id for room_id in range(self.room_num)
             if air_sensor_pollution_data[room_id] > pollution_threshold
         ]
 
@@ -1091,7 +1090,7 @@ class Agent:
 
         return linear_velocity, angular_velocity
 
-    def localizer(self, delta_distance, delta_yaw, scan_ranges):
+    def localizer(self, delta_distance, delta_yaw, scan_ranges, occupancy_grid_map, distance_map):
         """
         Localization by Particle Filter
         """
@@ -1111,15 +1110,17 @@ class Agent:
         self.particle_filter.update_particles_by_motion_model(delta_distance, delta_yaw)
         self.particle_filter.update_weights_by_measurement_model(
             scan_ranges=scan_ranges,
-            occupancy_grid_map=self.occupancy_grid_map,
-            distance_map=self.distance_map
+            occupancy_grid_map=occupancy_grid_map,
+            distance_map=distance_map,
+            map_origin=self.map_origin,
+            map_resolution=self.resolution
         )
         estimated_x, estimated_y, estimated_yaw = self.particle_filter.estimate_robot_pose()
         self.current_robot_pose = (estimated_x, estimated_y, estimated_yaw)
         self.particle_filter.resample_particles()
 
         # Print error
-        if False:
+        if True:
             dx = self.current_robot_pose[0] - self.true_robot_pose[0]
             dy = self.current_robot_pose[1] - self.true_robot_pose[1]
             distance_error = math.hypot(dx, dy)
@@ -1137,6 +1138,10 @@ class Agent:
             ):
         """
         current_fsm_state -> next_fsm_state, action
+
+        Using
+        -----
+        - self.room_num
         """
         # Define states of finite state machine
         FSM_READY = "READY"
@@ -1145,18 +1150,8 @@ class Agent:
         FSM_RETURNING = "RETURNING"
 
         # Indexes of initial node and docking station node by map
-        if map_id == 0:
-            initial_node_index = 2
-            docking_station_node_index = 3
-        elif map_id == 1:
-            initial_node_index = 5
-            docking_station_node_index = 6
-        elif map_id == 2:
-            initial_node_index = 8
-            docking_station_node_index = 9
-        elif map_id == 3:
-            initial_node_index = 13
-            docking_station_node_index = 14
+        initial_node_index = self.room_num
+        docking_station_node_index = self.room_num + 1
 
         def calculate_distance_to_target_position(current_position, target_position):
             """
