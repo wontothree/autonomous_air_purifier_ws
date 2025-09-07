@@ -276,7 +276,6 @@ class Map:
         upscaled_map = zoom(occupancy_grid_map, zoom=scale, order=0) 
         return upscaled_map
 
-
 @dataclass
 class Pose:
     """
@@ -749,7 +748,8 @@ class Agent:
             pollution_end_time,
             current_robot_pose,
             self.current_fsm_state,
-            self.map_id
+            self.map_id,
+            self.room_num
         )
         self.current_fsm_state = next_state 
         # --------------------------------------------------
