@@ -448,8 +448,9 @@ class ParticleFilter:
         -----
         - self.particle_num
         """   
-        def world2grid(x_world, y_world):
-            x_grid, y_grid = x_world, y_world
+        def world_to_grid_coordinate(x_world, y_world, origin_x=map_origin[0], origin_y=map_origin[1], resolution=map_resolution):
+            x_grid = int(round(origin_x + x_world / resolution))
+            y_grid = int(round(origin_y + y_world / resolution))
             return x_grid, y_grid
 
         eps = 1e-12
@@ -464,7 +465,6 @@ class ParticleFilter:
         
         # Map constant
         map_height, map_width = occupancy_grid_map.shape
-        map_origin_x, map_origin_y = map_origin
         
         # Initialize particle weight
         log_weights = np.zeros(self.particle_num, dtype=np.float64)
@@ -505,8 +505,7 @@ class ParticleFilter:
                 lidar_hit_y = particle_y + range_measurement * direction_y
                 
                 # Index
-                map_index_x = int(round((lidar_hit_x - map_origin_x) / map_resolution))
-                map_index_y = int(round((lidar_hit_y - map_origin_y) / map_resolution))
+                map_index_x, map_index_y = world_to_grid_coordinate(lidar_hit_x, lidar_hit_y)
                 
                 if 0 <= map_index_x < map_width and 0 <= map_index_y < map_height:
                     distance_in_cells = distance_map[map_index_y, map_index_x]
@@ -667,25 +666,26 @@ class Agent:
         self.current_robot_pose = (initial_robot_position[0], initial_robot_position[1], initial_robot_yaw)
 
         # Identify map
+        scale = 0.2 / self.resolution
         if map_info.num_rooms == 2: 
             self.map_id = 0
             self.room_num = 2
-            self.map_origin = (14, 20)
+            self.map_origin = (14 * scale, 20 * scale)
             map = self.map_obj.ORIGINAL_STRING_MAP0
         elif map_info.num_rooms == 5: 
             self.map_id = 1
             self.room_num = 5
-            self.map_origin = (25, 25)
+            self.map_origin = (25 * scale, 25 * scale)
             map = self.map_obj.ORIGINAL_STRING_MAP1
         elif map_info.num_rooms == 8:
             self.map_id = 2
             self.room_num = 8
-            self.map_origin = (37, 37)
+            self.map_origin = (37 * scale, 37 * scale)
             map = self.map_obj.ORIGINAL_STRING_MAP2
         elif map_info.num_rooms == 13:
             self.map_id = 3
             self.room_num = 13
-            self.map_origin = (40, 50)
+            self.map_origin = (40 * scale, 50 * scale)
             map = self.map_obj.ORIGINAL_STRING_MAP3
 
         # Finite state machine
