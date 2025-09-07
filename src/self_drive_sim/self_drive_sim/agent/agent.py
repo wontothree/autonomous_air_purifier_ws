@@ -448,6 +448,10 @@ class ParticleFilter:
         -----
         - self.particle_num
         """   
+        def world2grid(x_world, y_world):
+            x_grid, y_grid = x_world, y_world
+            return x_grid, y_grid
+
         eps = 1e-12
 
         beam_num = len(scan_ranges)
@@ -598,8 +602,8 @@ class Agent:
         self.logger = logger
         self.steps = 0
 
-        self.current_robot_pose = (None, None, None)
-        self.true_robot_pose = (None, None, None)
+        self.current_robot_pose = (0, 0, 0)
+        self.true_robot_pose = (0, 0, 0)
 
         # Map
         self.map_id = None
@@ -624,8 +628,8 @@ class Agent:
         # test
         self.target_position = None
         self.current_waypoint_index = 0
-        self.tmp_start_node = 8
-        self.tmp_end_node = 7
+        self.tmp_start_node = 5
+        self.tmp_end_node = 1
         self.max_localization_error = 0
 
     def initialize_map(self, map_info: MapInfo):
@@ -722,36 +726,36 @@ class Agent:
         """
 
         # --------------------------------------------------
-        # Observation
-        # pollution data
-        air_sensor_pollution_data = observation['air_sensor_pollution']
-        robot_sensor_pollution_data =  observation['sensor_pollution']
-        pollution_end_time = self.pollution_end_time
-        # IMU data
-        delta_distance = np.linalg.norm(observation["disp_position"])
-        delta_yaw = observation['disp_angle']
-        # LiDAR data
-        scan_ranges = observation['sensor_lidar_front']
+        # # Observation
+        # # pollution data
+        # air_sensor_pollution_data = observation['air_sensor_pollution']
+        # robot_sensor_pollution_data =  observation['sensor_pollution']
+        # pollution_end_time = self.pollution_end_time
+        # # IMU data
+        # delta_distance = np.linalg.norm(observation["disp_position"])
+        # delta_yaw = observation['disp_angle']
+        # # LiDAR data
+        # scan_ranges = observation['sensor_lidar_front']
 
-        # Localization
-        self.localizer(delta_distance, delta_yaw, scan_ranges, self.occupancy_grid_map, self.distance_map)
-        current_robot_pose = self.current_robot_pose
+        # # Localization
+        # self.localizer(delta_distance, delta_yaw, scan_ranges, self.occupancy_grid_map, self.distance_map)
+        # current_robot_pose = self.current_robot_pose
 
-        # Current time
-        dt = 0.1
-        current_time = self.steps * dt
+        # # Current time
+        # dt = 0.1
+        # current_time = self.steps * dt
 
-        next_state, action = self.finite_state_machine(
-            air_sensor_pollution_data,
-            robot_sensor_pollution_data,
-            current_time,
-            pollution_end_time,
-            current_robot_pose,
-            self.current_fsm_state,
-            self.map_id,
-            self.room_num
-        )
-        self.current_fsm_state = next_state 
+        # next_state, action = self.finite_state_machine(
+        #     air_sensor_pollution_data,
+        #     robot_sensor_pollution_data,
+        #     current_time,
+        #     pollution_end_time,
+        #     current_robot_pose,
+        #     self.current_fsm_state,
+        #     self.map_id,
+        #     self.room_num
+        # )
+        # self.current_fsm_state = next_state 
         # --------------------------------------------------
 
         # --------------------------------------------------
@@ -759,7 +763,7 @@ class Agent:
         # ------- 여기만 테스트 하세요 아빠 -------------------
         # --------------------------------------------------
         # --------------------------------------------------
-        # action = self.move_along_path(7, 4, self.map_id)
+        action = self.move_along_path(1, 2, self.map_id)
         # --------------------------------------------------
         # --------------------------------------------------
         # --------------------------------------------------
