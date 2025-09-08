@@ -331,7 +331,7 @@ class ParticleFilter:
         initial_x_noise=0.02,
         initial_y_noise=0.02,
         initial_yaw_noise=0.02,
-        odom_noise=[0.1, 0.01, 0.01, 0.1]
+        odom_noise=[0.01, 0.002, 0.002, 0.01]
         ):
         
         self.particle_set = []
@@ -448,9 +448,6 @@ class ParticleFilter:
         -----
         - self.particle_num
         """   
-        def world2grid(x_world, y_world):
-            x_grid, y_grid = x_world, y_world
-            return x_grid, y_grid
 
         eps = 1e-12
 
@@ -510,6 +507,7 @@ class ParticleFilter:
                 
                 if 0 <= map_index_x < map_width and 0 <= map_index_y < map_height:
                     distance_in_cells = distance_map[map_index_y, map_index_x]
+                    # distance_in_meters = float(distance_in_cells) * map_resolution
                     distance_in_meters = float(distance_in_cells)
                     
                     prob_hit = math.exp( -(distance_in_meters ** 2) * inv_denominator)
@@ -610,7 +608,7 @@ class Agent:
         self.map_id = None
         self.room_num = None
         self.map_origin = None
-        self.resolution = 0.02
+        self.resolution = 0.01
 
         # Finite state machine
         self.current_fsm_state = "READY"
@@ -668,31 +666,32 @@ class Agent:
         self.current_robot_pose = (initial_robot_position[0], initial_robot_position[1], initial_robot_yaw)
 
         # Identify map
-        scale = 0.2 / self.resolution
         if map_info.num_rooms == 2: 
             self.map_id = 0
             self.room_num = 2
-            self.map_origin = (14 * scale, 20 * scale)
+            self.map_origin = (14, 20)
             map = self.map_obj.ORIGINAL_STRING_MAP0
             self.current_node_index = 2
         elif map_info.num_rooms == 5: 
             self.map_id = 1
             self.room_num = 5
-            self.map_origin = (25 * scale, 25 * scale)
+            self.map_origin = (25, 25)
             map = self.map_obj.ORIGINAL_STRING_MAP1
             self.current_node_index = 5
         elif map_info.num_rooms == 8:
             self.map_id = 2
             self.room_num = 8
-            self.map_origin = (37 * scale, 37 * scale)
+            self.map_origin = (37, 37)
             map = self.map_obj.ORIGINAL_STRING_MAP2
             self.current_node_index = 8
         elif map_info.num_rooms == 13:
             self.map_id = 3
             self.room_num = 13
-            self.map_origin = (40 * scale, 50 * scale)
+            self.map_origin = (40, 50)
             map = self.map_obj.ORIGINAL_STRING_MAP3
             self.current_node_index = 13
+
+        self.log(f"Room Num: {self.room_num}")
 
         # Finite state machine
         self.current_fsm_state = "READY"
@@ -769,7 +768,7 @@ class Agent:
         # ------- 여기만 테스트 하세요 아빠 -------------------
         # --------------------------------------------------
         # --------------------------------------------------
-        # action = self.move_along_path(1, 2, self.map_id)
+        # action = self.move_along_path(1, 3, self.map_id)
         # --------------------------------------------------
         # --------------------------------------------------
         # --------------------------------------------------
@@ -921,43 +920,43 @@ class Agent:
             },
             1: {
                 (0, 1): [(-0.2, -2.0), (-1.6, -3.4), (-2.8, -3.4), (-2.8, -2.2)],               
-                (0, 2): [(-0.2, -2.0), (-1.6, -0.8), (-1.6, 0.8), (-2.2, 2.4)],
+                (0, 2): [(-0.2, -2.0), (-1.6, -0.8), (-1.6, 0.8), (-2.2, 2.2)],
                 (0, 3): [(-0.2, -2.0), (-0.6, 0.8), (1.0, 0.8), (1.0, 2.8)],
                 (0, 4): [(-0.2, -2.0), (0.8, -0.8), (4.2, -0.8), (4.2, 2.2)],
                 (0, 5): [(-0.2, -2.0), (0, -2)],
                 (0, 6): [(-0.2, -2.0), (0.8, -3.8), (2.8, -4.2)],
 
                 (1, 0): [(-2.8, -2.2), (-2.8, -3.4), (-1.6, -3.4), (-0.2, -2.0)],
-                (1, 2): [(-2.8, -2.2), (-2.8, -3.4), (-1.6, -3.4), (-1.6, -0.8), (-1.6, 0.8), (-2.2, 2.4)],
+                (1, 2): [(-2.8, -2.2), (-2.8, -3.4), (-1.6, -3.4), (-1.6, -0.8), (-1.6, 0.8), (-2.2, 2.2)],
                 (1, 3): [(-2.8, -2.2), (-2.8, -3.4), (-1.6, -3.4), (-0.6, -0.8), (-0.6, 0.8), (1.0, 0.8), (1.0, 2.8)],
                 (1, 4): [(-2.8, -2.2), (-2.8, -3.4), (-1.6, -3.4), (0.8, -0.8), (4.2, -0.8), (4.2, 2.2)],
                 (1, 5): [(-2.8, -2.2), (-2.8, -3.4), (-1.6, -3.4), (0, -2)],
                 (1, 6): [(-2.8, -2.2), (-2.8, -3.4), (-1.6, -3.4), (0.8, -3.8), (2.8, -4.2)],
                             
-                (2, 0): [(-2.2, 2.4), (-1.6, 0.8), (-1.6, -0.8), (-0.2, -2.0)],			
-                (2, 1): [(-2.2, 2.4), (-1.6, 0.8), (-1.6, -0.8), (-1.6, -3.4), (-2.8, -3.4), (-2.8, -2.2)],
-                (2, 3): [(-2.2, 2.4), (-1.6, 0.8), (-1.6, -0.8), (-0.6, -0.8), (-0.6, 0.8), (1.0, 0.8), (1.0, 2.8)],
-                (2, 4): [(-2.2, 2.4), (-1.6, 0.8), (-1.6, -0.8), (4.2, -0.8), (4.2, 2.2)],
-                (2, 5): [(-2.2, 2.4), (-1.6, 0.8), (-1.6, -0.8), (0, -2)],
-                (2, 6): [(-2.2, 2.4), (-1.6, 0.8), (-1.6, -0.8), (0.8, -3.8), (2.8, -4.2)],			
+                (2, 0): [(-2.2, 2.2), (-1.6, 0.8), (-1.6, -0.8), (-0.2, -2.0)],			
+                (2, 1): [(-2.2, 2.2), (-1.6, 0.8), (-1.6, -0.8), (-1.6, -3.4), (-2.8, -3.4), (-2.8, -2.2)],
+                (2, 3): [(-2.2, 2.2), (-1.6, 0.8), (-1.6, -0.8), (-0.6, -0.8), (-0.6, 0.8), (1.0, 0.8), (1.0, 2.8)],
+                (2, 4): [(-2.2, 2.2), (-1.6, 0.8), (-1.6, -0.8), (4.2, -0.8), (4.2, 2.2)],
+                (2, 5): [(-2.2, 2.2), (-1.6, 0.8), (-1.6, -0.8), (0, -2)],
+                (2, 6): [(-2.2, 2.2), (-1.6, 0.8), (-1.6, -0.8), (0.8, -3.8), (2.8, -4.2)],			
                     
                 (3, 0): [(1.0, 2.8), (1.0, 0.8), (-0.6, 0.8), (-0.6, -0.8), (-0.2, -2.0)],	
                 (3, 1): [(1.0, 2.8), (1.0, 0.8), (-0.6, 0.8), (-0.6, -0.8), (-1.6, -3.4), (-2.8, -3.4), (-2.8, -2.2)],
-                (3, 2): [(1.0, 2.8), (1.0, 0.8), (-0.6, 0.8), (-0.6, -0.8), (-1.6, -0.8), (-1.6, 0.8), (-2.2, 2.4)],
+                (3, 2): [(1.0, 2.8), (1.0, 0.8), (-0.6, 0.8), (-0.6, -0.8), (-1.6, -0.8), (-1.6, 0.8), (-2.2, 2.2)],
                 (3, 4): [(1.0, 2.8), (1.0, 0.8), (-0.6, 0.8), (-0.6, -0.8), (4.2, -0.8), (4.2, 2.2)],
                 (3, 5): [(1.0, 2.8), (1.0, 0.8), (-0.6, 0.8), (-0.6, -0.8), (0, -2)],
                 (3, 6): [(1.0, 2.8), (1.0, 0.8), (-0.6, 0.8), (-0.6, -0.8), (0.8, -3.8), (2.8, -4.2)],
 
                 (4, 0): [(4.2, 2.2), (4.2, -0.8), (0.8, -0.8), (-0.2, -2.0)],
                 (4, 1): [(4.2, 2.2), (4.2, -0.8), (0.8, -0.8), (-1.6, -3.4), (-2.8, -3.4), (-2.8, -2.2)],
-                (4, 2): [(4.2, 2.2), (4.2, -0.8), (-1.6, -0.8), (-1.6, 0.8), (-2.2, 2.4)],
+                (4, 2): [(4.2, 2.2), (4.2, -0.8), (-1.6, -0.8), (-1.6, 0.8), (-2.2, 2.2)],
                 (4, 3): [(4.2, 2.2), (4.2, -0.8), (-0.6, -0.8), (-0.6, 0.8), (1.0, 0.8), (1.0, 2.8)],
                 (4, 5): [(4.2, 2.2), (4.2, -0.8), (0.8, -0.8), (0, -2)],
                 (4, 6): [(4.2, 2.2), (4.2, -0.8), (2.8, -0.8), (2.8, -4.2)],
 
                 (5, 0): [(0, -2), (-0.2, -2.0)],
                 (5, 1): [(0, -2), (-1.6, -3.4), (-2.8, -3.4), (-2.8, -2.2)],               
-                (5, 2): [(0, -2), (-1.6, -0.8), (-1.6, 0.8), (-2.2, 2.4)],
+                (5, 2): [(0, -2), (-1.6, -0.8), (-1.6, 0.8), (-2.2, 2.2)],
                 (5, 3): [(0, -2), (-0.6, -0.8), (-0.6, 0.8), (1.0, 0.8), (1.0, 2.8)],
                 (5, 4): [(0, -2), (0.8, -0.8), (4.2, -0.8), (4.2, 2.2)],
                 (5, 6): [(0, -2), (0.8, -3.8), (2.8, -4.2)],
@@ -1057,10 +1056,6 @@ class Agent:
         }
 
         map_reference_waypoints = reference_waypoints[map_id]
-        
-        # Check validity of map_id
-        if map_id not in reference_waypoints:
-            return None
 
         # Check validity of node indexes
         if (start_node_index, end_node_index) not in map_reference_waypoints:
@@ -1140,7 +1135,6 @@ class Agent:
             dy = self.current_robot_pose[1] - self.true_robot_pose[1]
             self.distance_error = math.hypot(dx, dy)
             if self.distance_error > self.max_localization_error: self.max_localization_error = self.distance_error
-            # self.log(f"PF Error: {self.distance_error:.3f}")
 
     # Main Logic
     def finite_state_machine(self,
@@ -1292,7 +1286,6 @@ class Agent:
                 self.current_waypoint_index += 1
                 self.tmp_target_position = self.waypoints[self.current_waypoint_index]
 
-
         # log
         if current_fsm_state == FSM_NAVIGATING:
             self.log(f"[{current_time:.1f}] [NAVIGATING] {self.current_node_index} -> {self.optimal_next_node_index} | PF Error: {self.distance_error:.3f}")
@@ -1300,6 +1293,7 @@ class Agent:
             self.log(f"[{current_time:.1f}] [CLEANING] {air_sensor_pollution_data[self.current_node_index]:.3f} | PF Error: {self.distance_error:.3f}")
         else:
             self.log(f"[{current_time:.1f}] [{current_fsm_state}] | PF Error: {self.distance_error:.3f}")
+
 
         return next_fsm_state, action
 
