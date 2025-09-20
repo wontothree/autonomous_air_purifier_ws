@@ -14,3 +14,19 @@ services:
       - ..:/root/autonomous_agent_ws
     environment:
       - ROS_DOMAIN_ID=0
+      - DISPLAY=novnc:0.0
+    networks:
+      - ros_net
+
+  novnc:
+    image: theasp/novnc:latest
+    environment:
+      - DISPLAY_WIDTH=1920
+      - DISPLAY_HEIGHT=1080
+    ports:
+      - "8080:8080" # 웹 브라우저 접속 포트
+    networks:
+      - ros_net
+
+networks:
+  ros_net:
