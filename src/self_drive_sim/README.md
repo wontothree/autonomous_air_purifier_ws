@@ -142,3 +142,11 @@ source install/setup.bash
 cd src/self_drive_sim/self_drive_sim/agent
 python3 agent.py
 ```
+
+# Dependencies
+
+```bash
+sudo apt update
+sudo apt install python3-pip
+sudo pip3 install filterpy
+```

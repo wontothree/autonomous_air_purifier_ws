@@ -45,7 +45,7 @@ gazebo /root/autonomous_navigation_ws/install/gazebo_simulator/share/gazebo_simu
 ros2 launch gazebo_simulator robot_world.launch.py
 ```
 
-[http://localhost:8090/vnc.html](http://localhost:8090/vnc.html)
+[http://localhost:8080/vnc.html](http://localhost:8080/vnc.html)
 
 ```bash
 ps aux | grep -E 'gzserver|gzclient|ros2'
