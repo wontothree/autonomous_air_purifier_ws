@@ -1980,17 +1980,17 @@ class Agent:
         scan_ranges = observation['sensor_lidar_front']                 # LiDAR data
 
         # Localization
-        current_robot_pose = self.autonomous_navigator.localizer(
-            delta_distance, 
-            delta_yaw, 
-            scan_ranges, 
-            self.occupancy_grid_map, 
-            self.distance_map, 
-            self.map_origin, 
-            self.resolution
-        )
+        # current_robot_pose = self.autonomous_navigator.localizer(
+        #     delta_distance, 
+        #     delta_yaw, 
+        #     scan_ranges, 
+        #     self.occupancy_grid_map, 
+        #     self.distance_map, 
+        #     self.map_origin, 
+        #     self.resolution
+        # )
         # test
-        # current_robot_pose = self.true_robot_pose
+        current_robot_pose = self.true_robot_pose
 
         # Current time
         dt = 0.1
@@ -2105,6 +2105,197 @@ class Agent:
         self.logger(str(msg))
 
 # Testing --------------------------------------------------
+class ModelPredictivePathIntegralController:
+    def __init__(self,
+            state_dimension: int = 3,
+            control_dimension: int = 2,
+
+            prediction_horizon: int = 20,
+            control_period: float = 0.1,
+
+            sample_num: int = 3000,
+            max_control_inputs: np.ndarray = np.array([1.0, 2.0]),
+            min_control_inputs: np.ndarray = np.array([0.0, -2.0]),
+            non_biased_sampling_rate: float = 0.1,
+            collision_cost_weight: float = 1.0,
+
+            softmax_lambda: float = 0.3,
+        ):
+        self.state_dimension = state_dimension
+        self.control_dimension = control_dimension
+        self.prediction_horizon = prediction_horizon
+        self.control_period = control_period
+        self.sample_num = sample_num
+        self.max_control_inputs = max_control_inputs
+        self.min_control_inputs = min_control_inputs
+        self.non_biased_sampling_rate = non_biased_sampling_rate
+    
+        self.collision_cost_weight = collision_cost_weight
+        self.softmax_lambda = softmax_lambda
+
+        # solve
+        self.previous_control_sequence = np.zeros((self.prediction_horizon - 1, self.control_dimension))
+
+    def sample_control_sequence(self,
+            control_sequence_mean: np.ndarray,
+            control_sequence_covariance_matrices: np.ndarray
+        ):
+        num_biased = int((1 - self.non_biased_sampling_rate) * self.sample_num)
+
+        noise = np.random.multivariate_normal(
+            mean=np.zeros(self.control_dimension),
+            cov=control_sequence_covariance_matrices,
+            size=(self.sample_num, self.prediction_horizon - 1)
+        )
+
+        noised_control_sequences = np.zeros_like(noise)
+        noised_control_sequences[:num_biased] = control_sequence_mean + noise[:num_biased]
+        noised_control_sequences[num_biased:] = noise[num_biased:]
+
+        noised_control_sequences = np.clip(
+            noised_control_sequences,
+            self.min_control_inputs,
+            self.max_control_inputs
+        )
+
+        return noised_control_sequences
+    
+    def predict_state_sequence(self,
+            current_state: np.ndarray,
+            control_sequence: np.ndarray
+        ) -> tuple[np.ndarray, np.ndarray]:
+        # Declare state sequence
+        global_state_sequence = np.zeros((self.prediction_horizon, 3))
+        local_state_sequence = np.zeros((self.prediction_horizon, 3))
+
+        # Set initial state
+        global_state_sequence[0] = current_state
+        local_state_sequence[0] = [0.0, 0.0, 0.0]
+
+        for i in range(self.prediction_horizon - 1):
+            noisy_linear_velocity, noisy_angular_velocity = control_sequence[i]
+
+            # Update global state
+            global_x, global_y, global_yaw = global_state_sequence[i]
+            delta_global_x = noisy_linear_velocity * np.cos(global_yaw + noisy_angular_velocity * self.control_period / 2) * self.control_period
+            delta_global_y = noisy_linear_velocity * np.sin(global_yaw + noisy_angular_velocity * self.control_period / 2) * self.control_period
+            delta_global_yaw = noisy_angular_velocity * self.control_period
+
+            global_state_sequence[i + 1] = [
+                global_x + delta_global_x, 
+                global_y + delta_global_y, 
+                (global_yaw + delta_global_yaw + np.pi) % (2 * np.pi) - np.pi
+            ]
+
+            # Update local state
+            local_x, local_y, local_yaw = local_state_sequence[i]
+            delta_local_x = noisy_linear_velocity * np.cos(local_yaw + noisy_angular_velocity * self.control_period / 2) * self.control_period
+            delta_local_y = noisy_linear_velocity * np.sin(local_yaw  + noisy_angular_velocity * self.control_period / 2) * self.control_period
+            delta_local_yaw = noisy_angular_velocity * self.control_period
+
+            local_state_sequence[i + 1] = [
+                local_x + delta_local_x, 
+                local_y + delta_local_y, 
+                (local_yaw + delta_local_yaw + np.pi) % (2 * np.pi) - np.pi
+            ]
+
+        return global_state_sequence, local_state_sequence
+    
+    def calculate_state_sequence_cost(self,
+            global_state_sequence: np.ndarray,
+            local_state_sequence: np.ndarray,
+            target_position: tuple[float, float],
+            local_costmap: np.ndarray
+        ) -> float:
+        total_cost = 0
+
+        target_x, target_y = target_position
+        for i in range(self.prediction_horizon):
+            global_x, global_y, global_yaw = global_state_sequence[i]
+            target_yaw = np.arctan2(target_y - global_y, target_x - global_x)
+            difference_yaw = target_yaw - global_yaw
+            difference_yaw = (difference_yaw + np.pi) % (2 * np.pi) - np.pi
+
+            difference_x = global_x - target_x
+            difference_y = global_y - target_y
+
+            cost = 100 * (difference_x**2 + difference_y**2) + 0.0001 * difference_yaw**2
+
+            # test
+            # 장애물과의 충돌을 확인하기 위한 코드
+            state_x, state_y, _ = local_state_sequence[i]
+            state_x_index = int(state_x / 0.02)  # 해상도에 맞춰 인덱싱
+            state_y_index = int(state_y / 0.02)
+
+            # 장애물 여부 확인 (로컬 costmap에서 장애물이 있는지 체크)
+            if 0 <= state_x_index < local_costmap.shape[0] and 0 <= state_y_index < local_costmap.shape[1]:
+                if local_costmap[state_x_index, state_y_index] == 100:  # max_cost가 장애물 값을 의미
+                    # 장애물에 겹치면 추가 비용 부여
+                    cost += 50  # 장애물과 겹치는 경우 비용을 크게 추가
+
+            total_cost += cost
+
+        return total_cost
+    
+    def calculate_sample_cost(self,
+            control_sequence: np.ndarray,
+            control_cost_matrix: np.ndarray = np.diag([1, 0.0001]),
+            lambda_: float = 0.001   
+        )->float:
+        cost = lambda_ *np.sum((control_sequence @ control_cost_matrix) * control_sequence)
+        
+        return cost
+            
+    def softmax(self, 
+            costs 
+        ):
+        min_cost = np.min(costs) 
+        normalizing_constant = np.sum(np.exp(-(costs - min_cost) / self.softmax_lambda)) + 1e-10
+        softmax_costs = np.exp(-(costs - min_cost) / self.softmax_lambda) / normalizing_constant
+
+        return softmax_costs
+
+    def solve(self, 
+            current_state, 
+            target_position,
+            local_costmap
+        ):
+        # Sample control sequences
+        noised_control_sequences = self.sample_control_sequence(
+            control_sequence_mean=self.previous_control_sequence,
+            control_sequence_covariance_matrices= 0.01 * np.identity(self.control_dimension)
+        )
+
+        # Evaluate costs for each sample
+        costs = np.zeros(self.sample_num)
+        control_costs = np.zeros(self.sample_num)
+        for i in range(self.sample_num):
+            global_state_sequence, local_state_sequence = self.predict_state_sequence(
+                current_state=current_state, 
+                control_sequence=noised_control_sequences[i]
+            )
+
+            costs[i] = self.calculate_state_sequence_cost(
+                global_state_sequence=global_state_sequence, 
+                local_state_sequence=local_state_sequence, 
+                target_position=target_position, 
+                local_costmap=local_costmap
+            )
+
+            control_costs[i] = self.calculate_sample_cost(
+                control_sequence=noised_control_sequences[i]
+            )
+
+        softmax_weights = self.softmax(costs + control_costs)
+
+        optimal_control_sequence = np.sum(softmax_weights[:, np.newaxis, np.newaxis] * noised_control_sequences, axis=0)
+
+        # For biased random sampling
+        self.previous_control_sequence = optimal_control_sequence
+
+        return optimal_control_sequence
+
+
 
 class ScanProcessor:
     def __init__(self,
@@ -2375,232 +2566,37 @@ class LocalCostMapGenerator:
 
         return costmap
 
-class ModelPredictivePathIntegralController:
-    def __init__(self,
-            state_dimension: int = 3,
-            control_dimension: int = 2,
-
-            prediction_horizon: int = 20,
-            control_period: float = 0.1,
-
-            sample_num: int = 3000,
-            max_control_inputs: np.ndarray = np.array([1.0, 2.0]),
-            min_control_inputs: np.ndarray = np.array([0.0, -2.0]),
-            non_biased_sampling_rate: float = 0.1,
-            collision_cost_weight: float = 1.0,
-
-            softmax_lambda: float = 0.3,
-        ):
-        self.state_dimension = state_dimension
-        self.control_dimension = control_dimension
-        self.prediction_horizon = prediction_horizon
-        self.control_period = control_period
-        self.sample_num = sample_num
-        self.max_control_inputs = max_control_inputs
-        self.min_control_inputs = min_control_inputs
-        self.non_biased_sampling_rate = non_biased_sampling_rate
-    
-        self.collision_cost_weight = collision_cost_weight
-        self.softmax_lambda = softmax_lambda
-
-        # solve
-        self.previous_control_sequence = np.zeros((self.prediction_horizon - 1, self.control_dimension))
-
-    def sample_control_sequence(self,
-            control_sequence_mean: np.ndarray,
-            control_sequence_covariance_matrices: np.ndarray
-        ):
-        num_biased = int((1 - self.non_biased_sampling_rate) * self.sample_num)
-
-        noise = np.random.multivariate_normal(
-            mean=np.zeros(self.control_dimension),
-            cov=control_sequence_covariance_matrices,
-            size=(self.sample_num, self.prediction_horizon - 1)
-        )
-
-        noised_control_sequences = np.zeros_like(noise)
-        noised_control_sequences[:num_biased] = control_sequence_mean + noise[:num_biased]
-        noised_control_sequences[num_biased:] = noise[num_biased:]
-
-        noised_control_sequences = np.clip(
-            noised_control_sequences,
-            self.min_control_inputs,
-            self.max_control_inputs
-        )
-
-        return noised_control_sequences
-    
-    def predict_state_sequence(self,
-            current_state: np.ndarray,
-            control_sequence: np.ndarray
-        ) -> tuple[np.ndarray, np.ndarray]:
-        # Declare state sequence
-        global_state_sequence = np.zeros((self.prediction_horizon, 3))
-        local_state_sequence = np.zeros((self.prediction_horizon, 3))
-
-        # Set initial state
-        global_state_sequence[0] = current_state
-        local_state_sequence[0] = [0.0, 0.0, 0.0]
-
-        for i in range(self.prediction_horizon - 1):
-            noisy_linear_velocity, noisy_angular_velocity = control_sequence[i]
-
-            # Update global state
-            global_x, global_y, global_yaw = global_state_sequence[i]
-            delta_global_x = noisy_linear_velocity * np.cos(global_yaw + noisy_angular_velocity * self.control_period / 2) * self.control_period
-            delta_global_y = noisy_linear_velocity * np.sin(global_yaw + noisy_angular_velocity * self.control_period / 2) * self.control_period
-            delta_global_yaw = noisy_angular_velocity * self.control_period
-
-            global_state_sequence[i + 1] = [
-                global_x + delta_global_x, 
-                global_y + delta_global_y, 
-                (global_yaw + delta_global_yaw + np.pi) % (2 * np.pi) - np.pi
-            ]
-
-            # Update local state
-            local_x, local_y, local_yaw = local_state_sequence[i]
-            delta_local_x = noisy_linear_velocity * np.cos(local_yaw + noisy_angular_velocity * self.control_period / 2) * self.control_period
-            delta_local_y = noisy_linear_velocity * np.sin(local_yaw  + noisy_angular_velocity * self.control_period / 2) * self.control_period
-            delta_local_yaw = noisy_angular_velocity * self.control_period
-
-            local_state_sequence[i + 1] = [
-                local_x + delta_local_x, 
-                local_y + delta_local_y, 
-                (local_yaw + delta_local_yaw + np.pi) % (2 * np.pi) - np.pi
-            ]
-
-        return global_state_sequence, local_state_sequence
-    
-    def calculate_state_sequence_cost(self,
-            global_state_sequence: np.ndarray,
-            local_state_sequence: np.ndarray,
-            target_position: tuple[float, float],
-            local_costmap: np.ndarray
-        ) -> float:
-        total_cost = 0
-
-        target_x, target_y = target_position
-        for i in range(self.prediction_horizon):
-            global_x, global_y, global_yaw = global_state_sequence[i]
-            target_yaw = np.arctan2(target_y - global_y, target_x - global_x)
-            difference_yaw = target_yaw - global_yaw
-            difference_yaw = (difference_yaw + np.pi) % (2 * np.pi) - np.pi
-
-            difference_x = global_x - target_x
-            difference_y = global_y - target_y
-
-            cost = 100 * (difference_x**2 + difference_y**2) + 0.0001 * difference_yaw**2
-
-            # test
-            # 장애물과의 충돌을 확인하기 위한 코드
-            state_x, state_y, _ = local_state_sequence[i]
-            state_x_index = int(state_x / 0.02)  # 해상도에 맞춰 인덱싱
-            state_y_index = int(state_y / 0.02)
-
-            # 장애물 여부 확인 (로컬 costmap에서 장애물이 있는지 체크)
-            if 0 <= state_x_index < local_costmap.shape[0] and 0 <= state_y_index < local_costmap.shape[1]:
-                if local_costmap[state_x_index, state_y_index] == 100:  # max_cost가 장애물 값을 의미
-                    # 장애물에 겹치면 추가 비용 부여
-                    cost += 50  # 장애물과 겹치는 경우 비용을 크게 추가
-
-            total_cost += cost
-
-        return total_cost
-    
-    def calculate_sample_cost(self,
-            control_sequence: np.ndarray,
-            control_cost_matrix: np.ndarray = np.diag([1, 0.0001]),
-            lambda_: float = 0.001   
-        )->float:
-        cost = lambda_ *np.sum((control_sequence @ control_cost_matrix) * control_sequence)
-        
-        return cost
-            
-    def softmax(self, 
-            costs 
-        ):
-        min_cost = np.min(costs) 
-        normalizing_constant = np.sum(np.exp(-(costs - min_cost) / self.softmax_lambda)) + 1e-10
-        softmax_costs = np.exp(-(costs - min_cost) / self.softmax_lambda) / normalizing_constant
-
-        return softmax_costs
-
-    def solve(self, 
-            current_state, 
-            target_position,
-            local_costmap
-        ):
-        # Sample control sequences
-        noised_control_sequences = self.sample_control_sequence(
-            control_sequence_mean=self.previous_control_sequence,
-            control_sequence_covariance_matrices= 0.01 * np.identity(self.control_dimension)
-        )
-
-        # Evaluate costs for each sample
-        costs = np.zeros(self.sample_num)
-        control_costs = np.zeros(self.sample_num)
-        for i in range(self.sample_num):
-            global_state_sequence, local_state_sequence = self.predict_state_sequence(
-                current_state=current_state, 
-                control_sequence=noised_control_sequences[i]
-            )
-
-            costs[i] = self.calculate_state_sequence_cost(
-                global_state_sequence=global_state_sequence, 
-                local_state_sequence=local_state_sequence, 
-                target_position=target_position, 
-                local_costmap=local_costmap
-            )
-
-            control_costs[i] = self.calculate_sample_cost(
-                control_sequence=noised_control_sequences[i]
-            )
-
-        softmax_weights = self.softmax(costs + control_costs)
-
-        optimal_control_sequence = np.sum(softmax_weights[:, np.newaxis, np.newaxis] * noised_control_sequences, axis=0)
-
-        # For biased random sampling
-        self.previous_control_sequence = optimal_control_sequence
-
-        return optimal_control_sequence
-
+import time
 class DynamicObstacleTracker:
     def __init__(self,
             clustering_threshold: float = 0.3,                  # (m)
             min_cluster_size: int = 4,
             adaptive_lambda_rad: float = 20 * math.pi / 180,    # (rad)
-            adaptive_sigma: float = 0.01    
+            adaptive_sigma: float = 0.01,
+
+            velocity_threshold: float = 1.0,                    # (m/s)  
+            association_threshold: float = 1.0,                 # (m)
+            max_cluster_points: int = 100,                      # 클러스터의 최대 포인트 수
+            
+            dt: float = 0.1                                     # (s)
         ):
         self.clustering_threshold = clustering_threshold
         self.min_cluster_size = min_cluster_size
         self.adaptive_lambda_rad = adaptive_lambda_rad
         self.adaptive_sigma = adaptive_sigma
 
-        self.previous_clusters = []
-        self.current_clusters = []
-        self.previous_centers = []
-        self.previous_centers_map = []
-
-        # --- 튜닝 가능한 파라미터들 ---
-        self.association_radius = 0.5    # 기존 객체와 새 탐지를 연결할 최대 반경
-        self.min_classification_measurements = 5 # 분류를 시작하기 위한 최소 측정 횟수
-        self.static_std_threshold = 0.1  # 정적 장애물로 판단할 위치 표준편차의 최대값
-        self.ttl_limit = 5               # 객체가 탐지되지 않을 시 생존 시간 (프레임)
-
-        # --- 추적 객체들의 상태를 저장하는 병렬 리스트 ---
-        self.next_id = 0
-        self.ids = []
-        self.kfs = []           # 칼만 필터 객체 리스트
-        self.histories = []     # 위치 이력 리스트
-        self.ttls = []          # 남은 생존 시간 리스트
-        self.statuses = []      # 'PENDING', 'STATIC', 'DYNAMIC' 상태 리스트
-        self.static_counts = [] # 정적으로 판단된 횟수
-        self.total_evals = []   # 총 분류 시도 횟수
+        self.velocity_threshold = velocity_threshold
+        self.association_threshold = association_threshold
+        self.max_cluster_points = max_cluster_points
+        self.dt = dt
 
         # ScanProcessor Object
         self.scan_processor = ScanProcessor()
         self.scan_angle_increment = self.scan_processor.scan_angle_increment=0.016     # (rad)
+
+        # [Function] update
+        self.previous_centers_map = np.array([])
+        self.last_update_time = None
 
     def transform_robot_to_map_frame(self,
             pointclouds_robot: np.ndarray,
@@ -2654,246 +2650,75 @@ class DynamicObstacleTracker:
         breakpoint_indices = np.where(distances_between_points > final_thresholds)[0]
 
         # 4. breakpoint를 기준으로 포인트 클라우드 배열을 분할
-        # np.split은 분할 지점 '앞'에서 자르므로, 인덱스에 +1을 해줌
         clusters = np.split(pointcloud, breakpoint_indices + 1)
 
         clusters = [c for c in clusters if c.shape[0] >= self.min_cluster_size]
         
         return clusters
 
-    def detect_dynamic_obstacles(
-            self,
-            scan_ranges: np.ndarray,
-            current_robot_pose: tuple,
-            dt: float = 0.1,
-            velocity_threshold: float = 0.2
-        ) -> bool:
-        """
-        Detect whether dynamic obstacles exist.
-
-        Parameters
-        ----------
-        scan_ranges : np.ndarray
-            LiDAR scan ranges
-        current_robot_pose : tuple
-            (x, y, yaw) of robot in map frame
-        dt : float
-            Time since last scan [s]
-        velocity_threshold : float
-            Speed threshold above which an obstacle is considered dynamic [m/s]
-
-        Returns
-        -------
-        bool
-            True if any dynamic obstacle is detected, False otherwise
-        """
-
-        # 1. 현재 스캔에서 클러스터 추출
-        pc_robot = self.scan_processor.convert_scan_to_pointclouds(scan_ranges)
-        pc_robot = self.scan_processor.preprocess_pointclouds(pc_robot)
-        pc_map = self.transform_robot_to_map_frame(pc_robot, current_robot_pose)
-        current_clusters = self.extract_clusters(pc_map)
-
-        # 2. 클러스터 중심점 계산
-        current_centers = np.array([np.mean(c, axis=0) for c in current_clusters])
-
-        dynamic_detected = False
-
-        if hasattr(self, "previous_centers") and len(self.previous_centers) > 0:
-            prev_centers = self.previous_centers
-
-            # 3. 이전 중심점과 현재 중심점 매칭 (nearest neighbor)
-            for cc in current_centers:
-                distances = np.linalg.norm(prev_centers - cc, axis=1)
-                nearest_idx = np.argmin(distances)
-                min_dist = distances[nearest_idx]
-
-                # 4. 속도 추정
-                velocity = min_dist / dt
-                if velocity > velocity_threshold:
-                    dynamic_detected = True
-                    break  # 하나라도 동적이면 True
-
-        # 5. 이번 클러스터를 다음 iteration에 쓰기 위해 저장
-        self.previous_centers = current_centers
-
-        return dynamic_detected
-
     def update(self,
             scan_ranges: np.ndarray,
-            current_robot_pose: tuple,
-            dt: float = 0.1,
-            velocity_threshold: float = 0.2
-            ) -> bool:
-        """
-        수정된 최종 호출 함수.
-        클러스터링은 로봇 좌표계에서, 추적은 맵 좌표계에서 수행합니다.
-        """
+            current_robot_pose: tuple
+        ) -> bool:
+        
+        current_time = time.time()
+        if self.last_update_time is None:
+            self.last_update_time = current_time
+            # 첫 프레임에서는 dt 계산이 불가능하므로, 현재 상태만 저장하고 종료
+            pc_robot_init = self.scan_processor.convert_scan_to_pointclouds(scan_ranges)
+            clusters_robot_init = self.extract_clusters(pc_robot_init)
+            centers_robot_init = np.array([np.mean(c, axis=0) for c in clusters_robot_init])
+            self.previous_centers_map = self.transform_robot_to_map_frame(centers_robot_init, current_robot_pose)
+            return False
+        
+        dt = current_time - self.last_update_time
+        self.last_update_time = current_time
+        if dt < 1e-6: # 시간 간격이 너무 짧으면 계산 오류 방지
+            return False
 
-        # 1. 로봇 좌표계에서 포인트 클라우드 생성 및 전처리
+        # 2. 클러스터링 및 전처리
         pc_robot = self.scan_processor.convert_scan_to_pointclouds(scan_ranges)
         pc_robot = self.scan_processor.preprocess_pointclouds(pc_robot)
-
-        # 2. **로봇 좌표계에서** 클러스터 추출
-        # 이 단계가 가장 중요합니다.
         clusters_robot = self.extract_clusters(pc_robot)
 
-        if not clusters_robot: # 탐지된 클러스터가 없으면
+        # 3. 거대 클러스터 무시 (C++ 코드의 max_cluster_size 와 동일한 로직)
+        #    - 벽 등으로 인해 발생하는 중심점 불안정성 문제 해결
+        clusters_robot = [c for c in clusters_robot if len(c) < self.max_cluster_points]
+
+        if not clusters_robot:
             self.previous_centers_map = np.array([])
             return False
 
-        # 3. 로봇 좌표계에서 클러스터의 중심점 계산
+        # 4. 중심점 계산 및 좌표 변환
         current_centers_robot = np.array([np.mean(c, axis=0) for c in clusters_robot])
-
-        # 4. **중심점들만** 맵 좌표계로 변환
-        current_centers_map = self.transform_robot_to_map_frame(current_centers_robot, current_robot_pose)
+        current_centers_map = self.transform_robot_to_map_frame(
+            current_centers_robot, 
+            current_robot_pose
+        )
 
         dynamic_detected = False
-
-        # 5. 맵 좌표계에서 이전 중심점과 현재 중심점 매칭
-        if hasattr(self, "previous_centers_map") and len(self.previous_centers_map) > 0:
+        if len(self.previous_centers_map) > 0:
             prev_centers_map = self.previous_centers_map
 
             for cc_map in current_centers_map:
                 distances = np.linalg.norm(prev_centers_map - cc_map, axis=1)
                 
-                # 매칭할 이전 중심점이 없는 경우를 대비
                 if len(distances) == 0:
                     continue
 
                 nearest_idx = np.argmin(distances)
                 min_dist = distances[nearest_idx]
 
-                # min_dist는 이제 맵 상의 실제 변위이므로, association_radius는 불필요
-                # min_dist > association_radius 조건은 추적 로직에서 처리하는 것이 더 적합
+                # 5. 데이터 연관 게이팅 (C++ 코드의 euclidean_distance 와 동일)
+                if min_dist > self.association_threshold:
+                    continue
 
-                # 속도 추정
+                # 6. 속도 추정 (동적으로 계산된 dt 사용)
                 velocity = min_dist / dt
-                if velocity > velocity_threshold:
+                if velocity > self.velocity_threshold:
                     dynamic_detected = True
-                    break  # 하나라도 동적이면 True
+                    break
 
-        # 6. 이번 맵 좌표계 중심점을 다음 iteration에서 사용하기 위해 저장
         self.previous_centers_map = current_centers_map
-
         return dynamic_detected
-
-
-
-    # def update(self,
-    #         scan_ranges: np.ndarray,
-    #         current_robot_pose: tuple
-    #     )->int:
-    #     # pointclouds_robot = self.scan_processor.update(
-    #     #     scan_ranges
-    #     # )
-
-    #     # # Robot frame to map frame
-    #     # pointclouds_map = self.transform_robot_to_map_frame(
-    #     #     pointclouds_robot=pointclouds_robot,
-    #     #     current_robot_pose=current_robot_pose
-    #     # )
-
-    #     pc = self.scan_processor.convert_scan_to_pointclouds(
-    #         scan_ranges=scan_ranges
-    #     )
-    #     pc = self.scan_processor.preprocess_pointclouds(
-    #         pointclouds=pc
-    #     )
-    #     clusters = self.extract_clusters(
-    #         pc
-    #     )
-
-    #     return len(clusters)
-        
-
-    # def update(self, ranges, angles, dt):
-    #     """메인 업데이트 함수"""
-    #     # 1. 라이다 -> 점 -> 군집 -> 탐지(detections)
-    #     points = self._lidar_to_points(ranges, angles)
-    #     clusters = self._cluster_points(points)
-    #     detections = [np.mean(np.array(c), axis=0) for c in clusters if len(c) >= self.min_cluster_size]
-
-    #     # 2. 추적 (Tracking)
-    #     # 예측
-    #     for i in range(len(self.ids)):
-    #         self.kfs[i].F = np.array([[1, 0, dt, 0], [0, 1, 0, dt], [0, 0, 1, 0], [0, 0, 0, 1]])
-    #         self.kfs[i].predict()
-    #         self.ttls[i] -= 1
-
-    #     # 데이터 연관
-    #     unmatched_detections = list(range(len(detections)))
-    #     matches = []
-    #     for i in range(len(self.ids)):
-    #         for d_idx in unmatched_detections:
-    #             dist = np.linalg.norm(self.kfs[i].x[:2] - detections[d_idx])
-    #             if dist < self.association_radius:
-    #                 matches.append((i, d_idx))
-    #                 unmatched_detections.remove(d_idx)
-    #                 break
-        
-    #     # 연결된 객체 업데이트
-    #     for t_idx, d_idx in matches:
-    #         self.kfs[t_idx].update(detections[d_idx])
-    #         self.histories[t_idx].append(detections[d_idx])
-    #         if len(self.histories[t_idx]) > 30:
-    #             self.histories[t_idx].pop(0)
-    #         self.ttls[t_idx] = self.ttl_limit
-
-    #     # 새 객체 생성
-    #     for d_idx in unmatched_detections:
-    #         x, y = detections[d_idx]
-    #         kf = KalmanFilter(dim_x=4, dim_z=2)
-    #         kf.x = np.array([x, y, 0., 0.])
-    #         kf.F = np.array([[1, 0, dt, 0], [0, 1, 0, dt], [0, 0, 1, 0], [0, 0, 0, 1]])
-    #         kf.H = np.array([[1, 0, 0, 0], [0, 1, 0, 0]])
-    #         kf.R = np.eye(2) * 0.1
-    #         kf.P = np.eye(4) * 10.
-    #         kf.Q = np.eye(4) * 0.1
-            
-    #         self.ids.append(self.next_id)
-    #         self.kfs.append(kf)
-    #         self.histories.append([detections[d_idx]])
-    #         self.ttls.append(self.ttl_limit)
-    #         self.statuses.append('PENDING')
-    #         self.static_counts.append(0)
-    #         self.total_evals.append(0)
-    #         self.next_id += 1
-
-    #     # 3. 오래된 객체 삭제, 분류, 결과 생성
-    #     output = []
-    #     survivor_indices = [i for i, ttl in enumerate(self.ttls) if ttl > 0]
-        
-    #     for i in survivor_indices:
-    #         # 분류
-    #         if len(self.histories[i]) >= self.min_classification_measurements:
-    #             std_dev = np.std(np.array(self.histories[i]), axis=0)
-    #             self.total_evals[i] += 1
-    #             if np.all(std_dev < self.static_std_threshold):
-    #                 self.static_counts[i] += 1
-                
-    #             if (self.static_counts[i] / self.total_evals[i]) > 0.5:
-    #                 self.statuses[i] = 'STATIC'
-    #             else:
-    #                 self.statuses[i] = 'DYNAMIC'
-            
-    #         # 결과 저장
-    #         output.append({
-    #             'id': self.ids[i], 'status': self.statuses[i],
-    #             'x': self.kfs[i].x[0], 'y': self.kfs[i].x[1],
-    #             'vx': self.kfs[i].x[2], 'vy': self.kfs[i].x[3],
-    #         })
-        
-    #     # 살아남은 객체들의 정보만 남김
-    #     self.ids = [self.ids[i] for i in survivor_indices]
-    #     self.kfs = [self.kfs[i] for i in survivor_indices]
-    #     self.histories = [self.histories[i] for i in survivor_indices]
-    #     self.ttls = [self.ttls[i] for i in survivor_indices]
-    #     self.statuses = [self.statuses[i] for i in survivor_indices]
-    #     self.static_counts = [self.static_counts[i] for i in survivor_indices]
-    #     self.total_evals = [self.total_evals[i] for i in survivor_indices]
-
-    #     return output
-
-    # def track_dynamic_obstacle(self):
-    #     pass
+    
