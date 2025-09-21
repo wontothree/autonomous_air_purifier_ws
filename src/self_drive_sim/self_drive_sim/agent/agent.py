@@ -8,7 +8,7 @@ import itertools
 from dataclasses import dataclass, field
 from scipy.ndimage import distance_transform_edt, zoom
 
-ORIGINAL_STRING_MAP0 = """
+OCCUPANCY_GRID_MAP0 = """
 1111111111111111111111111111111111111111
 1111111111111111111111111111111111111111
 1100000000000000000000001000000000000011
@@ -41,7 +41,7 @@ ORIGINAL_STRING_MAP0 = """
 1111111111111111111111111111111111111111
 """
 
-ORIGINAL_STRING_MAP1 = """
+OCCUPANCY_GRID_MAP1 = """
 11111111111111111111111111111111111111111111111111
 11111111111111111111111111111111111111111111111111
 11111100001000000000001111111000000000000000000011
@@ -94,7 +94,7 @@ ORIGINAL_STRING_MAP1 = """
 11111111111111111111111111111111111111111111111111
 """
 
-ORIGINAL_STRING_MAP2 = """
+OCCUPANCY_GRID_MAP2 = """
 111111111111111111111111111111111111111111111111111111111000000000000000000
 111111111111111111111111111111111111111111111111111111111000000000000000000
 110000000000000000000000111110000001000000000000000000011000000000000000000
@@ -172,7 +172,7 @@ ORIGINAL_STRING_MAP2 = """
 000000000000000000000000000111111111111111111111111111111111111111111111111
 """
 
-ORIGINAL_STRING_MAP3 = """
+OCCUPANCY_GRID_MAP3 = """
 1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111
 1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111
 1100000000000000000000000000000000111111111111111100000000111100000000000000001111111100000000000011
@@ -766,8 +766,8 @@ if __name__ == "__main__":
     # calculator.print_distance_matrices()
 
     # Generate occupancy grid map
-    map_ = Map()
-    map_.print_occupancy_grid_map('./../../worlds/map0.npz')
+    # map_ = Map()
+    # map_.print_occupancy_grid_map('./../../worlds/map0.npz')
 
 @dataclass
 class Pose:
@@ -1318,6 +1318,7 @@ class AutonomousNavigator:
         self.mcl = MonteCarloLocalizer()
         self.go_to_goal_controller = GoToGoalController()
         self.local_costmap_generator = LocalCostMapGenerator()
+        self.dynamic_obstacle_tracker = DynamicObstacleTracker()
 
         # Monte carlo localization
         self.mcl.initialize_particles(initial_robot_pose)
@@ -1726,6 +1727,11 @@ class AutonomousNavigator:
             lookahead_position
         )
 
+        self.abc = self.perception(
+            scan_ranges=scan_ranges,
+            current_robot_pose=current_robot_pose
+        )
+
 
         # Local costmap
         # local_costmap = self.local_costmap_generator.generate_costmap(
@@ -1746,6 +1752,22 @@ class AutonomousNavigator:
         # self.abc = np.any(front_region == self.local_costmap_generator.max_cost)
 
         return linear_velocity, angular_velocity
+
+    def perception(self,
+            scan_ranges: np.ndarray,
+            current_robot_pose: tuple
+        ):
+        # num = self.dynamic_obstacle_tracker.update(
+        #     scan_ranges=scan_ranges,
+        #     current_robot_pose=current_robot_pose
+        # )
+
+        is_dynamic = self.dynamic_obstacle_tracker.update(
+            scan_ranges=scan_ranges,
+            current_robot_pose=current_robot_pose
+        )
+
+        return is_dynamic
 
     # Util functions
     def calculate_distance_to_target_position(self,
@@ -1879,25 +1901,25 @@ class Agent:
             self.map_room_num = 2
             self.map_origin = (-14 *0.2, -20 * 0.2)
             self.pollution_end_time = 20
-            map = ORIGINAL_STRING_MAP0
+            map = OCCUPANCY_GRID_MAP0
         elif map_info.num_rooms == 5: 
             self.map_id = 1
             self.map_room_num = 5
             self.map_origin = (-25 * 0.2, -25 * 0.2)
             self.pollution_end_time = 80
-            map = ORIGINAL_STRING_MAP1
+            map = OCCUPANCY_GRID_MAP1
         elif map_info.num_rooms == 8:
             self.map_id = 2
             self.map_room_num = 8
             self.map_origin = (-37 * 0.2, -37 * 0.2)
             self.pollution_end_time = 130
-            map = ORIGINAL_STRING_MAP2
-        elif map_info.num_rooms == 13:
+            map = OCCUPANCY_GRID_MAP2
+        elif map_info.num_rooms== 13:
             self.map_id = 3
             self.map_room_num = 13
             self.map_origin = (-40 * 0.2, -50 * 0.2)
             self.pollution_end_time = 200
-            map = ORIGINAL_STRING_MAP3
+            map = OCCUPANCY_GRID_MAP3
 
         # Finite state machine
         self.current_fsm_state = "READY"
@@ -2110,8 +2132,8 @@ class ScanProcessor:
         self.scan_min_angle = scan_min_angle
         self.scan_angle_increment = scan_angle_increment
 
-    def convert_scan_to_pointcloud(self,
-            scan_distances: np.ndarray
+    def convert_scan_to_pointclouds(self,
+            scan_ranges: np.ndarray
         )->np.ndarray:
         """
         angle, measurement -> x, y
@@ -2128,14 +2150,14 @@ class ScanProcessor:
         """
         scan_angles = self.scan_min_angle + np.arange(self.scan_point_num) * self.scan_angle_increment
 
-        pointcloud_xs = scan_distances * np.cos(scan_angles)
-        pointcloud_ys = scan_distances * np.sin(scan_angles)
+        pointcloud_xs = scan_ranges * np.cos(scan_angles)
+        pointcloud_ys = scan_ranges * np.sin(scan_angles)
 
         pointclouds = np.vstack((pointcloud_xs, pointcloud_ys)).T
         
         return pointclouds
 
-    def preprocess_pointcloud(self,
+    def preprocess_pointclouds(self,
             pointclouds: np.ndarray
         )->np.ndarray: 
         """
@@ -2218,8 +2240,8 @@ class ScanProcessor:
     def update(self,
             scan_ranges: np.ndarray
         )->np.ndarray:
-        pointcloud = self.convert_scan_to_pointcloud(scan_ranges)
-        preprocessed_pointcloud = self.preprocess_pointcloud(pointcloud)
+        pointcloud = self.convert_scan_to_pointclouds(scan_ranges)
+        preprocessed_pointcloud = self.preprocess_pointclouds(pointcloud)
         no_robot_pointcloud = self.transform_laser_to_robot_frame(preprocessed_pointcloud)
         processed_pointcloud = self.remove_points_within_robot(no_robot_pointcloud)
 
@@ -2543,12 +2565,24 @@ class ModelPredictivePathIntegralController:
 
         return optimal_control_sequence
 
-from filterpy.kalman import KalmanFilter
 class DynamicObstacleTracker:
-    def __init__(self):
+    def __init__(self,
+            clustering_threshold: float = 0.3,                  # (m)
+            min_cluster_size: int = 4,
+            adaptive_lambda_rad: float = 20 * math.pi / 180,    # (rad)
+            adaptive_sigma: float = 0.01    
+        ):
+        self.clustering_threshold = clustering_threshold
+        self.min_cluster_size = min_cluster_size
+        self.adaptive_lambda_rad = adaptive_lambda_rad
+        self.adaptive_sigma = adaptive_sigma
+
+        self.previous_clusters = []
+        self.current_clusters = []
+        self.previous_centers = []
+        self.previous_centers_map = []
+
         # --- 튜닝 가능한 파라미터들 ---
-        self.clustering_threshold = 0.2  # 점들을 같은 객체로 묶을 최대 거리 (미터)
-        self.min_cluster_size = 5        # 장애물로 인정할 최소 점의 개수
         self.association_radius = 0.5    # 기존 객체와 새 탐지를 연결할 최대 반경
         self.min_classification_measurements = 5 # 분류를 시작하기 위한 최소 측정 횟수
         self.static_std_threshold = 0.1  # 정적 장애물로 판단할 위치 표준편차의 최대값
@@ -2566,107 +2600,300 @@ class DynamicObstacleTracker:
 
         # ScanProcessor Object
         self.scan_processor = ScanProcessor()
+        self.scan_angle_increment = self.scan_processor.scan_angle_increment=0.016     # (rad)
 
-    def _cluster_points(self, points):
-        """점들을 거리 기반으로 군집화(clustering)"""
-        if not points:
-            return []
+    def transform_robot_to_map_frame(self,
+            pointclouds_robot: np.ndarray,
+            current_robot_pose: tuple
+        ) -> np.ndarray:
+        current_robot_x_map, current_robot_y_map, current_robot_yaw_map = current_robot_pose
+
+        cos_yaw_map = np.cos(current_robot_yaw_map)
+        sin_yaw_map = np.sin(current_robot_yaw_map)
+        rotation_matrix = np.array([
+            [cos_yaw_map, -sin_yaw_map],
+            [sin_yaw_map, cos_yaw_map]
+        ])
+        rotated_pointclouds = pointclouds_robot @ rotation_matrix.T
+        pointclouds_map = rotated_pointclouds + np.array([
+            current_robot_x_map, current_robot_y_map
+        ])
+
+        return pointclouds_map
+
+    def extract_clusters(self, 
+            pointcloud: np.ndarray
+        ) -> list[np.ndarray]:
+        """
+
+        """
+        if pointcloud.shape[0] < 2:
+            return [pointcloud] if pointcloud.shape[0] > 0 else []
+
+        # Distances
+        deltas = np.diff(pointcloud, axis=0)
+        distances_between_points = np.linalg.norm(deltas, axis=1)
+
+        # Distance from origin
+        distances_from_origin = np.linalg.norm(pointcloud, axis=1)
         
-        clusters = [[points[0]]]
-        for point in points[1:]:
-            dist = np.linalg.norm(point - clusters[-1][-1])
-            if dist > self.clustering_threshold:
-                clusters.append([])
-            clusters[-1].append(point)
+        # 이전 점과 현재 점 중 더 가까운 거리를 기준으로 임계값 계산
+        relevant_dists = np.minimum(distances_from_origin[:-1], distances_from_origin[1:])
+        
+        sin_lambda_minus_dphi = math.sin(self.adaptive_lambda_rad - self.scan_angle_increment)
+        if abs(sin_lambda_minus_dphi) < 1e-9:
+             sin_lambda_minus_dphi = 1e-9
+
+        adaptive_thresholds = (relevant_dists * math.sin(self.scan_angle_increment) / sin_lambda_minus_dphi + self.adaptive_sigma)
+        
+        # 고정 임계값과 적응형 임계값 중 더 큰 값을 최종 임계값으로 사용
+        # (가까운 거리에서는 고정 임계값이, 먼 거리에서는 적응형 임계값이 유리함)
+        final_thresholds = np.maximum(self.clustering_threshold, adaptive_thresholds)
+
+        # 3. 임계값을 초과하는 지점(breakpoint)의 인덱스를 찾음
+        breakpoint_indices = np.where(distances_between_points > final_thresholds)[0]
+
+        # 4. breakpoint를 기준으로 포인트 클라우드 배열을 분할
+        # np.split은 분할 지점 '앞'에서 자르므로, 인덱스에 +1을 해줌
+        clusters = np.split(pointcloud, breakpoint_indices + 1)
+
+        clusters = [c for c in clusters if c.shape[0] >= self.min_cluster_size]
+        
         return clusters
 
-    def update(self, ranges, angles, dt):
-        """메인 업데이트 함수"""
-        # 1. 라이다 -> 점 -> 군집 -> 탐지(detections)
-        points = self._lidar_to_points(ranges, angles)
-        clusters = self._cluster_points(points)
-        detections = [np.mean(np.array(c), axis=0) for c in clusters if len(c) >= self.min_cluster_size]
+    def detect_dynamic_obstacles(
+            self,
+            scan_ranges: np.ndarray,
+            current_robot_pose: tuple,
+            dt: float = 0.1,
+            velocity_threshold: float = 0.2
+        ) -> bool:
+        """
+        Detect whether dynamic obstacles exist.
 
-        # 2. 추적 (Tracking)
-        # 예측
-        for i in range(len(self.ids)):
-            self.kfs[i].F = np.array([[1, 0, dt, 0], [0, 1, 0, dt], [0, 0, 1, 0], [0, 0, 0, 1]])
-            self.kfs[i].predict()
-            self.ttls[i] -= 1
+        Parameters
+        ----------
+        scan_ranges : np.ndarray
+            LiDAR scan ranges
+        current_robot_pose : tuple
+            (x, y, yaw) of robot in map frame
+        dt : float
+            Time since last scan [s]
+        velocity_threshold : float
+            Speed threshold above which an obstacle is considered dynamic [m/s]
 
-        # 데이터 연관
-        unmatched_detections = list(range(len(detections)))
-        matches = []
-        for i in range(len(self.ids)):
-            for d_idx in unmatched_detections:
-                dist = np.linalg.norm(self.kfs[i].x[:2] - detections[d_idx])
-                if dist < self.association_radius:
-                    matches.append((i, d_idx))
-                    unmatched_detections.remove(d_idx)
-                    break
-        
-        # 연결된 객체 업데이트
-        for t_idx, d_idx in matches:
-            self.kfs[t_idx].update(detections[d_idx])
-            self.histories[t_idx].append(detections[d_idx])
-            if len(self.histories[t_idx]) > 30:
-                self.histories[t_idx].pop(0)
-            self.ttls[t_idx] = self.ttl_limit
+        Returns
+        -------
+        bool
+            True if any dynamic obstacle is detected, False otherwise
+        """
 
-        # 새 객체 생성
-        for d_idx in unmatched_detections:
-            x, y = detections[d_idx]
-            kf = KalmanFilter(dim_x=4, dim_z=2)
-            kf.x = np.array([x, y, 0., 0.])
-            kf.F = np.array([[1, 0, dt, 0], [0, 1, 0, dt], [0, 0, 1, 0], [0, 0, 0, 1]])
-            kf.H = np.array([[1, 0, 0, 0], [0, 1, 0, 0]])
-            kf.R = np.eye(2) * 0.1
-            kf.P = np.eye(4) * 10.
-            kf.Q = np.eye(4) * 0.1
-            
-            self.ids.append(self.next_id)
-            self.kfs.append(kf)
-            self.histories.append([detections[d_idx]])
-            self.ttls.append(self.ttl_limit)
-            self.statuses.append('PENDING')
-            self.static_counts.append(0)
-            self.total_evals.append(0)
-            self.next_id += 1
+        # 1. 현재 스캔에서 클러스터 추출
+        pc_robot = self.scan_processor.convert_scan_to_pointclouds(scan_ranges)
+        pc_robot = self.scan_processor.preprocess_pointclouds(pc_robot)
+        pc_map = self.transform_robot_to_map_frame(pc_robot, current_robot_pose)
+        current_clusters = self.extract_clusters(pc_map)
 
-        # 3. 오래된 객체 삭제, 분류, 결과 생성
-        output = []
-        survivor_indices = [i for i, ttl in enumerate(self.ttls) if ttl > 0]
-        
-        for i in survivor_indices:
-            # 분류
-            if len(self.histories[i]) >= self.min_classification_measurements:
-                std_dev = np.std(np.array(self.histories[i]), axis=0)
-                self.total_evals[i] += 1
-                if np.all(std_dev < self.static_std_threshold):
-                    self.static_counts[i] += 1
+        # 2. 클러스터 중심점 계산
+        current_centers = np.array([np.mean(c, axis=0) for c in current_clusters])
+
+        dynamic_detected = False
+
+        if hasattr(self, "previous_centers") and len(self.previous_centers) > 0:
+            prev_centers = self.previous_centers
+
+            # 3. 이전 중심점과 현재 중심점 매칭 (nearest neighbor)
+            for cc in current_centers:
+                distances = np.linalg.norm(prev_centers - cc, axis=1)
+                nearest_idx = np.argmin(distances)
+                min_dist = distances[nearest_idx]
+
+                # 4. 속도 추정
+                velocity = min_dist / dt
+                if velocity > velocity_threshold:
+                    dynamic_detected = True
+                    break  # 하나라도 동적이면 True
+
+        # 5. 이번 클러스터를 다음 iteration에 쓰기 위해 저장
+        self.previous_centers = current_centers
+
+        return dynamic_detected
+
+    def update(self,
+            scan_ranges: np.ndarray,
+            current_robot_pose: tuple,
+            dt: float = 0.1,
+            velocity_threshold: float = 0.2
+            ) -> bool:
+        """
+        수정된 최종 호출 함수.
+        클러스터링은 로봇 좌표계에서, 추적은 맵 좌표계에서 수행합니다.
+        """
+
+        # 1. 로봇 좌표계에서 포인트 클라우드 생성 및 전처리
+        pc_robot = self.scan_processor.convert_scan_to_pointclouds(scan_ranges)
+        pc_robot = self.scan_processor.preprocess_pointclouds(pc_robot)
+
+        # 2. **로봇 좌표계에서** 클러스터 추출
+        # 이 단계가 가장 중요합니다.
+        clusters_robot = self.extract_clusters(pc_robot)
+
+        if not clusters_robot: # 탐지된 클러스터가 없으면
+            self.previous_centers_map = np.array([])
+            return False
+
+        # 3. 로봇 좌표계에서 클러스터의 중심점 계산
+        current_centers_robot = np.array([np.mean(c, axis=0) for c in clusters_robot])
+
+        # 4. **중심점들만** 맵 좌표계로 변환
+        current_centers_map = self.transform_robot_to_map_frame(current_centers_robot, current_robot_pose)
+
+        dynamic_detected = False
+
+        # 5. 맵 좌표계에서 이전 중심점과 현재 중심점 매칭
+        if hasattr(self, "previous_centers_map") and len(self.previous_centers_map) > 0:
+            prev_centers_map = self.previous_centers_map
+
+            for cc_map in current_centers_map:
+                distances = np.linalg.norm(prev_centers_map - cc_map, axis=1)
                 
-                if (self.static_counts[i] / self.total_evals[i]) > 0.5:
-                    self.statuses[i] = 'STATIC'
-                else:
-                    self.statuses[i] = 'DYNAMIC'
-            
-            # 결과 저장
-            output.append({
-                'id': self.ids[i], 'status': self.statuses[i],
-                'x': self.kfs[i].x[0], 'y': self.kfs[i].x[1],
-                'vx': self.kfs[i].x[2], 'vy': self.kfs[i].x[3],
-            })
+                # 매칭할 이전 중심점이 없는 경우를 대비
+                if len(distances) == 0:
+                    continue
+
+                nearest_idx = np.argmin(distances)
+                min_dist = distances[nearest_idx]
+
+                # min_dist는 이제 맵 상의 실제 변위이므로, association_radius는 불필요
+                # min_dist > association_radius 조건은 추적 로직에서 처리하는 것이 더 적합
+
+                # 속도 추정
+                velocity = min_dist / dt
+                if velocity > velocity_threshold:
+                    dynamic_detected = True
+                    break  # 하나라도 동적이면 True
+
+        # 6. 이번 맵 좌표계 중심점을 다음 iteration에서 사용하기 위해 저장
+        self.previous_centers_map = current_centers_map
+
+        return dynamic_detected
+
+
+
+    # def update(self,
+    #         scan_ranges: np.ndarray,
+    #         current_robot_pose: tuple
+    #     )->int:
+    #     # pointclouds_robot = self.scan_processor.update(
+    #     #     scan_ranges
+    #     # )
+
+    #     # # Robot frame to map frame
+    #     # pointclouds_map = self.transform_robot_to_map_frame(
+    #     #     pointclouds_robot=pointclouds_robot,
+    #     #     current_robot_pose=current_robot_pose
+    #     # )
+
+    #     pc = self.scan_processor.convert_scan_to_pointclouds(
+    #         scan_ranges=scan_ranges
+    #     )
+    #     pc = self.scan_processor.preprocess_pointclouds(
+    #         pointclouds=pc
+    #     )
+    #     clusters = self.extract_clusters(
+    #         pc
+    #     )
+
+    #     return len(clusters)
         
-        # 살아남은 객체들의 정보만 남김
-        self.ids = [self.ids[i] for i in survivor_indices]
-        self.kfs = [self.kfs[i] for i in survivor_indices]
-        self.histories = [self.histories[i] for i in survivor_indices]
-        self.ttls = [self.ttls[i] for i in survivor_indices]
-        self.statuses = [self.statuses[i] for i in survivor_indices]
-        self.static_counts = [self.static_counts[i] for i in survivor_indices]
-        self.total_evals = [self.total_evals[i] for i in survivor_indices]
 
-        return output
+    # def update(self, ranges, angles, dt):
+    #     """메인 업데이트 함수"""
+    #     # 1. 라이다 -> 점 -> 군집 -> 탐지(detections)
+    #     points = self._lidar_to_points(ranges, angles)
+    #     clusters = self._cluster_points(points)
+    #     detections = [np.mean(np.array(c), axis=0) for c in clusters if len(c) >= self.min_cluster_size]
 
-    def track_dynamic_obstacle(self):
-        pass
+    #     # 2. 추적 (Tracking)
+    #     # 예측
+    #     for i in range(len(self.ids)):
+    #         self.kfs[i].F = np.array([[1, 0, dt, 0], [0, 1, 0, dt], [0, 0, 1, 0], [0, 0, 0, 1]])
+    #         self.kfs[i].predict()
+    #         self.ttls[i] -= 1
+
+    #     # 데이터 연관
+    #     unmatched_detections = list(range(len(detections)))
+    #     matches = []
+    #     for i in range(len(self.ids)):
+    #         for d_idx in unmatched_detections:
+    #             dist = np.linalg.norm(self.kfs[i].x[:2] - detections[d_idx])
+    #             if dist < self.association_radius:
+    #                 matches.append((i, d_idx))
+    #                 unmatched_detections.remove(d_idx)
+    #                 break
+        
+    #     # 연결된 객체 업데이트
+    #     for t_idx, d_idx in matches:
+    #         self.kfs[t_idx].update(detections[d_idx])
+    #         self.histories[t_idx].append(detections[d_idx])
+    #         if len(self.histories[t_idx]) > 30:
+    #             self.histories[t_idx].pop(0)
+    #         self.ttls[t_idx] = self.ttl_limit
+
+    #     # 새 객체 생성
+    #     for d_idx in unmatched_detections:
+    #         x, y = detections[d_idx]
+    #         kf = KalmanFilter(dim_x=4, dim_z=2)
+    #         kf.x = np.array([x, y, 0., 0.])
+    #         kf.F = np.array([[1, 0, dt, 0], [0, 1, 0, dt], [0, 0, 1, 0], [0, 0, 0, 1]])
+    #         kf.H = np.array([[1, 0, 0, 0], [0, 1, 0, 0]])
+    #         kf.R = np.eye(2) * 0.1
+    #         kf.P = np.eye(4) * 10.
+    #         kf.Q = np.eye(4) * 0.1
+            
+    #         self.ids.append(self.next_id)
+    #         self.kfs.append(kf)
+    #         self.histories.append([detections[d_idx]])
+    #         self.ttls.append(self.ttl_limit)
+    #         self.statuses.append('PENDING')
+    #         self.static_counts.append(0)
+    #         self.total_evals.append(0)
+    #         self.next_id += 1
+
+    #     # 3. 오래된 객체 삭제, 분류, 결과 생성
+    #     output = []
+    #     survivor_indices = [i for i, ttl in enumerate(self.ttls) if ttl > 0]
+        
+    #     for i in survivor_indices:
+    #         # 분류
+    #         if len(self.histories[i]) >= self.min_classification_measurements:
+    #             std_dev = np.std(np.array(self.histories[i]), axis=0)
+    #             self.total_evals[i] += 1
+    #             if np.all(std_dev < self.static_std_threshold):
+    #                 self.static_counts[i] += 1
+                
+    #             if (self.static_counts[i] / self.total_evals[i]) > 0.5:
+    #                 self.statuses[i] = 'STATIC'
+    #             else:
+    #                 self.statuses[i] = 'DYNAMIC'
+            
+    #         # 결과 저장
+    #         output.append({
+    #             'id': self.ids[i], 'status': self.statuses[i],
+    #             'x': self.kfs[i].x[0], 'y': self.kfs[i].x[1],
+    #             'vx': self.kfs[i].x[2], 'vy': self.kfs[i].x[3],
+    #         })
+        
+    #     # 살아남은 객체들의 정보만 남김
+    #     self.ids = [self.ids[i] for i in survivor_indices]
+    #     self.kfs = [self.kfs[i] for i in survivor_indices]
+    #     self.histories = [self.histories[i] for i in survivor_indices]
+    #     self.ttls = [self.ttls[i] for i in survivor_indices]
+    #     self.statuses = [self.statuses[i] for i in survivor_indices]
+    #     self.static_counts = [self.static_counts[i] for i in survivor_indices]
+    #     self.total_evals = [self.total_evals[i] for i in survivor_indices]
+
+    #     return output
+
+    # def track_dynamic_obstacle(self):
+    #     pass
