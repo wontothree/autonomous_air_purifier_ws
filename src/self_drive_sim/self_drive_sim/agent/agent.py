@@ -716,7 +716,7 @@ class DistanceMatrixCalculator:
 class Map:
     def print_occupancy_grid_map(self, 
             map_path
-        ):
+        ) -> None:
         if not os.path.exists(map_path):
             raise FileNotFoundError(f"Map file not found: {map_path}")
         wall_grid = FloorMap.from_file(map_path).to_map_info(0, None, 0.0).wall_grid
@@ -1899,7 +1899,7 @@ class Agent:
         if map_info.num_rooms == 2: 
             self.map_id = 0
             self.map_room_num = 2
-            self.map_origin = (-14 *0.2, -20 * 0.2)
+            self.map_origin = (-14 * 0.2, -20 * 0.2)
             self.pollution_end_time = 20
             map = OCCUPANCY_GRID_MAP0
         elif map_info.num_rooms == 5: 
@@ -2577,17 +2577,19 @@ class DynamicObstacleTracker:
             velocity_threshold: float = 1.0,                    # (m/s)  
             association_threshold: float = 1.0,                 # (m)
             max_cluster_points: int = 100,                      # 클러스터의 최대 포인트 수
+            rotation_sensitivity_gain: float = 1.0,
             
             dt: float = 0.1                                     # (s)
         ):
+        # Constants
         self.clustering_threshold = clustering_threshold
         self.min_cluster_size = min_cluster_size
         self.adaptive_lambda_rad = adaptive_lambda_rad
         self.adaptive_sigma = adaptive_sigma
-
         self.velocity_threshold = velocity_threshold
         self.association_threshold = association_threshold
         self.max_cluster_points = max_cluster_points
+        self.rotation_sensitivity_gain = rotation_sensitivity_gain
         self.dt = dt
 
         # ScanProcessor Object
@@ -2655,70 +2657,72 @@ class DynamicObstacleTracker:
         clusters = [c for c in clusters if c.shape[0] >= self.min_cluster_size]
         
         return clusters
-
+    
     def update(self,
             scan_ranges: np.ndarray,
             current_robot_pose: tuple
         ) -> bool:
         
+        # --- 1. 시간 계산 및 상태 초기화 ---
         current_time = time.time()
-        if self.last_update_time is None:
+        if self.last_update_time is None or self.previous_pose is None:
             self.last_update_time = current_time
-            # 첫 프레임에서는 dt 계산이 불가능하므로, 현재 상태만 저장하고 종료
-            pc_robot_init = self.scan_processor.convert_scan_to_pointclouds(scan_ranges)
-            clusters_robot_init = self.extract_clusters(pc_robot_init)
-            centers_robot_init = np.array([np.mean(c, axis=0) for c in clusters_robot_init])
-            self.previous_centers_map = self.transform_robot_to_map_frame(centers_robot_init, current_robot_pose)
+            self.previous_pose = current_robot_pose
+            
+            # 첫 프레임의 클러스터만 저장하고 종료
+            initial_pc_robot = self.scan_processor.update(scan_ranges)
+            initial_clusters = self.extract_clusters(initial_pc_robot)
+            initial_centers = np.array([np.mean(c, axis=0) for c in initial_clusters])
+            if initial_centers.size > 0:
+                self.previous_centers_map = self.transform_robot_to_map_frame(initial_centers, current_robot_pose)
             return False
         
         dt = current_time - self.last_update_time
         self.last_update_time = current_time
-        if dt < 1e-6: # 시간 간격이 너무 짧으면 계산 오류 방지
+        if dt < 1e-6:
             return False
 
-        # 2. 클러스터링 및 전처리
-        pc_robot = self.scan_processor.convert_scan_to_pointclouds(scan_ranges)
-        pc_robot = self.scan_processor.preprocess_pointclouds(pc_robot)
+        # --- 2. 탐지(Detection): ScanProcessor를 통한 전처리 및 군집화 ---
+        # [리팩토링] ScanProcessor의 update를 호출하여 모든 전처리(필터링, 좌표변환 등)를 한번에 수행
+        pc_robot = self.scan_processor.update(scan_ranges)
+        
         clusters_robot = self.extract_clusters(pc_robot)
-
-        # 3. 거대 클러스터 무시 (C++ 코드의 max_cluster_size 와 동일한 로직)
-        #    - 벽 등으로 인해 발생하는 중심점 불안정성 문제 해결
         clusters_robot = [c for c in clusters_robot if len(c) < self.max_cluster_points]
 
         if not clusters_robot:
             self.previous_centers_map = np.array([])
+            self.previous_pose = current_robot_pose
             return False
 
-        # 4. 중심점 계산 및 좌표 변환
-        current_centers_robot = np.array([np.mean(c, axis=0) for c in clusters_robot])
         current_centers_map = self.transform_robot_to_map_frame(
-            current_centers_robot, 
+            np.array([np.mean(c, axis=0) for c in clusters_robot]),
             current_robot_pose
         )
 
+        # --- 3. 추적(Tracking) 및 분류(Classification) ---
+        # [안정화] 회전으로 인한 오탐지 방지를 위해 적응형 속도 임계값 계산
+        delta_yaw = current_robot_pose[2] - self.previous_pose[2]
+        delta_yaw = math.atan2(math.sin(delta_yaw), math.cos(delta_yaw))
+        rotational_velocity = abs(delta_yaw) / dt
+        adaptive_v_thresh = self.velocity_threshold + self.rotation_sensitivity_gain * rotational_velocity
+
         dynamic_detected = False
         if len(self.previous_centers_map) > 0:
-            prev_centers_map = self.previous_centers_map
-
             for cc_map in current_centers_map:
-                distances = np.linalg.norm(prev_centers_map - cc_map, axis=1)
-                
-                if len(distances) == 0:
-                    continue
+                distances = np.linalg.norm(self.previous_centers_map - cc_map, axis=1)
+                if len(distances) == 0: continue
+                min_dist = np.min(distances)
 
-                nearest_idx = np.argmin(distances)
-                min_dist = distances[nearest_idx]
-
-                # 5. 데이터 연관 게이팅 (C++ 코드의 euclidean_distance 와 동일)
                 if min_dist > self.association_threshold:
                     continue
 
-                # 6. 속도 추정 (동적으로 계산된 dt 사용)
                 velocity = min_dist / dt
-                if velocity > self.velocity_threshold:
+                if velocity > adaptive_v_thresh:
                     dynamic_detected = True
                     break
-
+        
+        # --- 4. 상태 갱신 ---
         self.previous_centers_map = current_centers_map
+        self.previous_pose = current_robot_pose
+        
         return dynamic_detected
-    
