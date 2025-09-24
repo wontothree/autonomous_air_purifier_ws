@@ -1131,56 +1131,6 @@ class MonteCarloLocalizer:
         effective_sample_size = 1.0 / weight_sum
         return effective_sample_size
 
-    # def resample_particles(self):
-    #     """
-    #     Update
-    #     ------
-    #     - self.particles
-
-    #     Using
-    #     -----
-    #     - self.particle_num
-    #     - self.omega_slow
-    #     - self.omega_fast
-    #     - self.alpha_slow
-    #     - self.alpha_slow
-    #     - self.resample_ess_ratio
-    #     - self.estimated_x
-    #     - self.estimated_y
-    #     - self.estimated_yaw
-    #     - self.random
-    #     """
-    #     # Inspect effective sample size
-    #     threshold = self.particle_num * self.resample_ess_ratio
-    #     effective_sample_size = self.calculate_effective_sample_size()
-    #     if effective_sample_size > threshold:
-    #         return
-
-    #     # Check movement threshold
-    #     if self.delta_distance_abs_sum < self.delta_distance_resample_threshold and self.delta_yaw_abs_sum < self.delta_yaw_resample_threshold:
-    #         return
-    #     self.delta_distance_abs_sum = 0
-    #     self.delta_yaw_abs_sum = 0
-
-    #     # Normalize weights
-    #     weights = np.array([particle.weight for particle in self.particles])
-    #     weights /= np.sum(weights)  # normalize
-    #     cumulative_sum = np.cumsum(weights)
-
-    #     positions = (np.arange(self.particle_num) + np.random.uniform()) / self.particle_num
-    #     indices = np.searchsorted(cumulative_sum, positions)
-
-    #     # Resampled particles
-    #     self.particles = [
-    #         Particle(pose=Pose(
-    #             _x=self.particles[i].pose.x,
-    #             _y=self.particles[i].pose.y,
-    #             _yaw=self.particles[i].pose.yaw),
-    #             weight=1.0 / self.particle_num
-    #         )
-    #         for i in indices
-    #     ]
-
     def resample_particles(self):
         """
         Update
@@ -1195,6 +1145,10 @@ class MonteCarloLocalizer:
         - self.alpha_slow
         - self.alpha_slow
         - self.resample_ess_ratio
+        - self.estimated_x
+        - self.estimated_y
+        - self.estimated_yaw
+        - self.random
         """
         # Inspect effective sample size
         threshold = self.particle_num * self.resample_ess_ratio
@@ -1213,41 +1167,87 @@ class MonteCarloLocalizer:
         weights /= np.sum(weights)  # normalize
         cumulative_sum = np.cumsum(weights)
 
-        # Calculate the number of random resampling particles
-        random_resampling_rate = self.calculate_amcl_random_resampling_particle_rate(self.average_likelihood)
-        random_resampling_particle_num = int(self.particle_num * random_resampling_rate)
-        non_random_resampling_particle_num = self.particle_num - random_resampling_particle_num
-
-        # Non-random resampling
-        positions = (np.arange(non_random_resampling_particle_num) + np.random.uniform()) / self.particle_num
+        positions = (np.arange(self.particle_num) + np.random.uniform()) / self.particle_num
         indices = np.searchsorted(cumulative_sum, positions)
 
-        # Resample non-random particles
-        self.particles[:non_random_resampling_particle_num] = [
-            Particle(
-                pose=Pose(
-                    _x=self.particles[i].pose.x,
-                    _y=self.particles[i].pose.y,
-                    _yaw=self.particles[i].pose.yaw
-                ),
+        # Resampled particles
+        self.particles = [
+            Particle(pose=Pose(
+                _x=self.particles[i].pose.x,
+                _y=self.particles[i].pose.y,
+                _yaw=self.particles[i].pose.yaw),
                 weight=1.0 / self.particle_num
             )
             for i in indices
         ]
 
-        # Resample random particles
-        xo, yo, yawo = self.estimated_x, self.estimated_y, self.estimated_yaw
-        self.particles[non_random_resampling_particle_num:] = [
-            Particle(
-                pose=Pose(
-                    _x=xo + np.random.normal(0, self.random_resampling_noise_std[0]),
-                    _y=yo + np.random.normal(0, self.random_resampling_noise_std[1]),
-                    _yaw=yawo + np.random.normal(0, self.random_resampling_noise_std[2])
-                ),
-                weight=1.0 / self.particle_num
-            )
-            for i in range(non_random_resampling_particle_num, self.particle_num)
-        ]
+    # def resample_particles(self):
+    #     """
+    #     Update
+    #     ------
+    #     - self.particles
+
+    #     Using
+    #     -----
+    #     - self.particle_num
+    #     - self.omega_slow
+    #     - self.omega_fast
+    #     - self.alpha_slow
+    #     - self.alpha_slow
+    #     - self.resample_ess_ratio
+    #     """
+    #     # Inspect effective sample size
+    #     threshold = self.particle_num * self.resample_ess_ratio
+    #     effective_sample_size = self.calculate_effective_sample_size()
+    #     if effective_sample_size > threshold:
+    #         return
+
+    #     # Check movement threshold
+    #     if self.delta_distance_abs_sum < self.delta_distance_resample_threshold and self.delta_yaw_abs_sum < self.delta_yaw_resample_threshold:
+    #         return
+    #     self.delta_distance_abs_sum = 0
+    #     self.delta_yaw_abs_sum = 0
+
+    #     # Normalize weights
+    #     weights = np.array([particle.weight for particle in self.particles])
+    #     weights /= np.sum(weights)  # normalize
+    #     cumulative_sum = np.cumsum(weights)
+
+    #     # Calculate the number of random resampling particles
+    #     random_resampling_rate = self.calculate_amcl_random_resampling_particle_rate(self.average_likelihood)
+    #     random_resampling_particle_num = int(self.particle_num * random_resampling_rate)
+    #     non_random_resampling_particle_num = self.particle_num - random_resampling_particle_num
+
+    #     # Non-random resampling
+    #     positions = (np.arange(non_random_resampling_particle_num) + np.random.uniform()) / self.particle_num
+    #     indices = np.searchsorted(cumulative_sum, positions)
+
+    #     # Resample non-random particles
+    #     self.particles[:non_random_resampling_particle_num] = [
+    #         Particle(
+    #             pose=Pose(
+    #                 _x=self.particles[i].pose.x,
+    #                 _y=self.particles[i].pose.y,
+    #                 _yaw=self.particles[i].pose.yaw
+    #             ),
+    #             weight=1.0 / self.particle_num
+    #         )
+    #         for i in indices
+    #     ]
+
+    #     # Resample random particles
+    #     xo, yo, yawo = self.estimated_x, self.estimated_y, self.estimated_yaw
+    #     self.particles[non_random_resampling_particle_num:] = [
+    #         Particle(
+    #             pose=Pose(
+    #                 _x=xo + np.random.normal(0, self.random_resampling_noise_std[0]),
+    #                 _y=yo + np.random.normal(0, self.random_resampling_noise_std[1]),
+    #                 _yaw=yawo + np.random.normal(0, self.random_resampling_noise_std[2])
+    #             ),
+    #             weight=1.0 / self.particle_num
+    #         )
+    #         for i in range(non_random_resampling_particle_num, self.particle_num)
+    #     ]
 
 class LocalCostMapGenerator:
     def __init__(self,
@@ -1509,6 +1509,66 @@ class LocalCostMapGenerator:
 
         return costmap
 
+class GoToGoalController:
+    def __init__(self,
+            max_linear_velocity=1.0,
+            max_angular_velocity=2.0,
+            linear_velocity_gain=1.0,
+            angular_velocity_gain=2.0,
+            angle_threshold=0.05
+        ) -> None:
+        self.max_linear_velocity = max_linear_velocity
+        self.max_angular_velocity = max_angular_velocity
+        self.linear_velocity_gain = linear_velocity_gain
+        self.angular_velocity_gain = angular_velocity_gain
+        self.angle_threshold = angle_threshold
+
+    def go_to_goal_controller(self, 
+            current_robot_pose, 
+            target_position,
+            is_obstacle=False,
+        ) -> tuple[float, float]:
+        """
+        Returns
+        -------
+        - linear_velocity
+        - angular_velocity
+
+        Usings
+        ------
+        - self.angle_threshold
+        - self.max_angular_velocity
+        - self.max_linear_velocity
+        - self.linear_velocity_gain
+        - self.angular_velocity_gain
+        """
+        current_robot_x, current_robot_y, current_robot_yaw = current_robot_pose
+        target_x, target_y = target_position
+
+        dx = current_robot_x - target_x
+        dy = current_robot_y - target_y
+        d_distance = math.hypot(dx, dy)
+
+        target_angle = math.atan2(-dy, -dx)  
+        d_yaw = math.atan2(math.sin(target_angle - current_robot_yaw),
+                           math.cos(target_angle - current_robot_yaw))
+
+        if abs(d_yaw) > self.angle_threshold:
+            linear_velocity = 0.0
+            angular_velocity = max(-self.max_angular_velocity,
+                min(self.max_angular_velocity, self.angular_velocity_gain * d_yaw))
+        elif is_obstacle:
+            linear_velocity = 0.0
+            angular_velocity = 0.0
+        else:
+            linear_velocity = max(-self.max_linear_velocity,
+                min(self.max_linear_velocity, self.linear_velocity_gain * d_distance))
+            angular_velocity = max(-self.max_angular_velocity,
+                min(self.max_angular_velocity, self.angular_velocity_gain * d_yaw))
+
+        return linear_velocity, angular_velocity
+
+
 class AutonomousNavigator:
     def __init__(self,
             initial_robot_pose,
@@ -1521,7 +1581,6 @@ class AutonomousNavigator:
 
         # Class object
         self.mcl = MonteCarloLocalizer()
-        self.go_to_goal_controller = GoToGoalController()
         self.local_costmap_generator = LocalCostMapGenerator()
 
         # Monte carlo localization
@@ -2024,6 +2083,13 @@ class AutonomousNavigator:
                 if local_costmap[row, col] >= max_cost:
                     is_obstacle = True
                     break
+                # r_start = max(0, y_idx - 1)
+                # r_end   = min(height, y_idx + 2)
+                # c_start = max(0, x_idx - 1)
+                # c_end   = min(width, x_idx + 2)
+                # if np.any(local_costmap[r_start:r_end, c_start:c_end] == max_cost):
+                #     is_obstacle = True
+                #     break
 
             if row == row1 and col == col1:
                 break
@@ -2037,8 +2103,6 @@ class AutonomousNavigator:
                 row += sy
 
         return is_obstacle & is_1m
-
-
 
 
     # Util functions
@@ -2164,7 +2228,7 @@ class Agent:
         ---
         """
         # Constant
-        self.resolution = 0.01
+        self.resolution = 0.02
 
         # Identify and initialize map
         self.map = Map()        
