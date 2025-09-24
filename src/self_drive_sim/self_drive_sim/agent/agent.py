@@ -550,8 +550,8 @@ all_map_reference_waypoints = {
         (9,10): [(-6.0, 8.0), (-4.8, 7.6), (-4.8, -7.2), (-4.8, 6.6), (-3.6, 5.8), (-3.6, 6.0), (-3.6, 3.6)],
         (9,11): [(-6.0, 8.0), (-4.8, 7.6), (-4.8, -7.2), (-4.8, 6.6), (-5.2, 4.8), (-5.2, 0.4), (-4.7, -2.2), (-4.8, -3.7), (-5.3, -4.3), (-5.3, -6.1), (-1.0, -6.1), (-1.0, -5.0), (-0.2, -2.8)],
         (9,12): [(-6.0, 8.0), (-4.8, 7.6), (-4.8, -7.2), (-4.8, 6.6), (-1.8, 5.8), (-1.8, 5.4), (-1.8, 4.8), (-1.2, 2.6)],
-        (9,13): [(-6.0, 8.0), (-4.8, 7.6), (-4.8, -7.2), (-4.8, 6.6), (-5.2, 4.8), (-7.2, 5.0), (-7.0, 5.0)],
-        (9,14): [(-6.0, 8.0), (-4.8, 7.6), (-4.8, -7.2), (-4.8, 6.6), (-5.2, 4.8), (-7.2, 5.0), (-7.2, 2.8)],
+        (9,13): [(-6.0, 8.0), (-4.8, 7.6), (-4.8, -7.2), (-4.8, 6.6), (-5.2, 6.6), (-5.2, 4.8), (-7.2, 5.0), (-7.0, 5.0)],
+        (9,14): [(-6.0, 8.0), (-4.8, 7.6), (-4.8, -7.2), (-4.8, 6.6), (-5.2, 6.6), (-5.2, 4.8), (-7.2, 5.0), (-7.2, 2.8)],
 
         (10, 0): [(-3.6, 3.6), (-3.6, 1.0), (-5.2, 0.4), (-4.7, -2.2)],
         (10, 1): [(-3.6, 3.6), (-3.6, 1.0), (-6.9, 0.5), (-6.9, -4.0), (-7.2, -5.0), (-7.2, -9.0)],
@@ -1249,64 +1249,265 @@ class MonteCarloLocalizer:
             for i in range(non_random_resampling_particle_num, self.particle_num)
         ]
 
-class GoToGoalController:
+class LocalCostMapGenerator:
     def __init__(self,
-            max_linear_velocity=1.0,
-            max_angular_velocity=2.0,
-            linear_velocity_gain=1.0,
-            angular_velocity_gain=2.0,
-            angle_threshold=0.05
-        ) -> None:
-        self.max_linear_velocity = max_linear_velocity
-        self.max_angular_velocity = max_angular_velocity
-        self.linear_velocity_gain = linear_velocity_gain
-        self.angular_velocity_gain = angular_velocity_gain
-        self.angle_threshold = angle_threshold
+            scan_point_num=241,
+            scan_min_range=0.05,                 # (m)
+            scan_max_range=8,                    # (m)
+            scan_min_angle=-1.9,                 # (rad)
+            scan_angle_increment=0.016,          # (rad)
 
-    def go_to_goal_controller(self, 
-            current_robot_pose, 
-            target_position,
-            is_obstacle=False,
-        ) -> tuple[float, float]:
+            baselink_to_front=0.25,              # (m)
+            baselink_to_rear=0.25,               # (m)
+            baselink_to_right=0.25,              # (m)
+            baselink_to_left=0.25,               # (m)
+            baselink_to_laser=[0.147, 0.0, 0.0], # [x (m), y (m), yaw (rad)]
+
+            map_x_length: int = 16,              # (m)
+            map_y_length: int = 16,              # (m)
+            map_center_x_offset: int = 0,        # (m)
+            map_center_y_offset: int = 0,        # (m)
+            map_resolution: float = 0.02,        # (m)
+            max_cost: int = 100
+        ) -> None:
+        # Constants
+        self.baselink_to_front = baselink_to_front
+        self.baselink_to_rear = baselink_to_rear
+        self.baselink_to_right = baselink_to_right
+        self.baselink_to_left = baselink_to_left
+        self.baselink_to_laser = baselink_to_laser
+        self.scan_point_num = scan_point_num
+        self.scan_min_range = scan_min_range
+        self.scan_max_range = scan_max_range
+        self.scan_min_angle = scan_min_angle
+        self.scan_angle_increment = scan_angle_increment
+        self.map_x_length = map_x_length
+        self.map_y_length = map_y_length
+        self.map_center_x_offset = map_center_x_offset
+        self.map_center_y_offset = map_center_y_offset
+        self.map_resolution = map_resolution
+        self.max_cost = max_cost
+
+    def convert_scan_to_pointclouds(self,
+            scan_ranges: np.ndarray
+        ) -> np.ndarray:
         """
+        angle, measurement -> x, y
+
+        Parameter
+        ---------
+        - scan_distance
+
+        Using
+        -----
+        - self.scan_point_num
+        - self.scan_min_angle
+        - self.scan_angle_increment
+        """
+        scan_angles = self.scan_min_angle + np.arange(self.scan_point_num) * self.scan_angle_increment
+
+        pointcloud_xs = scan_ranges * np.cos(scan_angles)
+        pointcloud_ys = scan_ranges * np.sin(scan_angles)
+
+        pointclouds = np.vstack((pointcloud_xs, pointcloud_ys)).T
+        
+        return pointclouds
+
+    def preprocess_pointclouds(self,
+            pointclouds: np.ndarray
+        ) -> np.ndarray: 
+        """
+        Parameters
+        ----------
+        - pointcloud
+
+        Using
+        -----
+        - self.scan_min_range
+        - self.scan_max_range
+        """
+        # remove too near or too far points
+        distances = np.linalg.norm(pointclouds[:, :2], axis=1)
+
+        is_in_range = (distances >= self.scan_min_range) & (distances <= self.scan_max_range)
+        return pointclouds[is_in_range]
+
+    def transform_laser_to_robot_frame(self,
+            pointclouds: np.ndarray
+        ) -> np.ndarray: 
+        """
+        Parameter
+        ---------
+        - pointclouds
+
+        Return
+        ------
+        np.ndarray of shape (N, 2)
+            Points transformed to the robot frame.
+
+        Using
+        -----
+        - self.baselink_to_laser
+        """
+        # Laser pose relative to robot frame
+        laser_x, laser_y, laser_theta = self.baselink_to_laser
+
+        # Rotation matrix
+        cos_theta, sin_theta = np.cos(laser_theta), np.sin(laser_theta)
+        rotation_matrix = np.array([[cos_theta, -sin_theta],
+                                    [sin_theta,  cos_theta]])
+
+        # Apply rotation and translation
+        transformed_pointclouds = pointclouds @ rotation_matrix.T + np.array([laser_x, laser_y])
+
+        return transformed_pointclouds
+
+    def remove_points_within_robot(self,
+            pointclouds: np.ndarray
+        ) -> np.ndarray: 
+        """
+        robot frame coordinate
+        X axis: forward
+        Y axis: left
+
+        Parameter
+        ---------
+        - pointcloud
+
+        Using
+        -----
+        - self.baselink_to_rear
+        - self.baselink_to_front
+        - self.baselink_to_right
+        - self.baselink_to_left
+        """
+        min_x = - self.baselink_to_rear
+        max_x = self.baselink_to_front
+        min_y = - self.baselink_to_right
+        max_y = self.baselink_to_left
+
+        is_inside_box = (
+            (pointclouds[:, 0] >= min_x) & (pointclouds[:, 0] <= max_x) &
+            (pointclouds[:, 1] >= min_y) & (pointclouds[:, 1] <= max_y)
+        )
+
+        return pointclouds[~is_inside_box]
+
+    def convert_pointcloud_to_costmap(self,
+            pointclouds: np.ndarray    
+        ):
+        """
+        Parameter
+        ---------
+        - pointcloud
+
         Returns
         -------
-        - linear_velocity
-        - angular_velocity
+        - costmap
+        - occupied_indices
 
-        Usings
-        ------
-        - self.angle_threshold
-        - self.max_angular_velocity
-        - self.max_linear_velocity
-        - self.linear_velocity_gain
-        - self.angular_velocity_gain
+        Using
+        -----
+        - self.map_x_length
+        - self.map_y_length
+        - self.map_center_x_offset 
+        - self.map_center_y_offset
+        - self.map_resolution 
+        - self.max_cost 
         """
-        current_robot_x, current_robot_y, current_robot_yaw = current_robot_pose
-        target_x, target_y = target_position
+        # Map dimensions in pixels
+        height = int(self.map_x_length / self.map_resolution)
+        width  = int(self.map_y_length / self.map_resolution)
 
-        dx = current_robot_x - target_x
-        dy = current_robot_y - target_y
-        d_distance = math.hypot(dx, dy)
+        # Initialize costmap as 0
+        costmap = np.zeros((height, width), dtype=np.float32)
 
-        target_angle = math.atan2(-dy, -dx)  
-        d_yaw = math.atan2(math.sin(target_angle - current_robot_yaw),
-                           math.cos(target_angle - current_robot_yaw))
+        # Convert pointcloud coordinates to map indices
+        col_indices = ((pointclouds[:, 1] + self.map_y_length / 2) / self.map_resolution).astype(int) # y
+        row_indices = ((pointclouds[:, 0] + self.map_x_length / 2) / self.map_resolution).astype(int) # x
 
-        if abs(d_yaw) > self.angle_threshold:
-            linear_velocity = 0.0
-            angular_velocity = max(-self.max_angular_velocity,
-                min(self.max_angular_velocity, self.angular_velocity_gain * d_yaw))
-        elif is_obstacle:
-            linear_velocity = 0.0
-            angular_velocity = 0.0
-        else:
-            linear_velocity = max(-self.max_linear_velocity,
-                min(self.max_linear_velocity, self.linear_velocity_gain * d_distance))
-            angular_velocity = max(-self.max_angular_velocity,
-                min(self.max_angular_velocity, self.angular_velocity_gain * d_yaw))
+        # Keep only points inside the map
+        valid_mask = (row_indices >= 0) & (row_indices < height) & (col_indices >= 0) & (col_indices < width)
+        row_indices = row_indices[valid_mask]
+        col_indices = col_indices[valid_mask]
 
-        return linear_velocity, angular_velocity
+        # Fill costmap
+        costmap[row_indices, col_indices] = self.max_cost
+
+        # Save occupied indices
+        occupied_indices = list(set(zip(row_indices, col_indices)))
+
+        return costmap, occupied_indices
+
+    def inflate_rigid_body(self,
+            costmap: np.ndarray,
+            occupied_indices: list    
+        ):
+        """
+        Parameters
+        ----------
+        - costmap
+        - occupied_indices
+
+        Return
+        - costmap
+
+        Using
+        -----
+        - self.map_resolution
+        - self.max_cost
+        - self.baselink_to_front
+        - self.baselink_to_rear
+        - self.baselink_to_right
+        - self.baselink_to_left
+        """
+        # Offsets (robot half-dimensions in grid cells)
+        front_offset = int(np.ceil(self.baselink_to_front / self.map_resolution))
+        rear_offset  = int(np.ceil(self.baselink_to_rear  / self.map_resolution))
+        right_offset = int(np.ceil(self.baselink_to_right / self.map_resolution))
+        left_offset  = int(np.ceil(self.baselink_to_left  / self.map_resolution))
+
+        map_height, map_width = costmap.shape
+
+        for row, col in occupied_indices:
+            # Compute inflation bounds (clamped to map size)
+            row_start = max(row - right_offset, 0)
+            row_end   = min(row + left_offset + 1, map_height)
+
+            col_start = max(col - rear_offset, 0)
+            col_end   = min(col + front_offset + 1, map_width)
+
+            # Inflate costmap region
+            costmap[row_start:row_end, col_start:col_end] = self.max_cost
+
+        return costmap
+
+    def generate_costmap(self,
+            scan_ranges: np.ndarray
+        ) -> np.ndarray:
+
+        pointclouds = self.convert_scan_to_pointclouds(
+            scan_ranges=scan_ranges
+        )
+        preprocessed_pointclouds = self.preprocess_pointclouds(
+            pointclouds=pointclouds
+        )
+        no_robot_pointclouds = self.transform_laser_to_robot_frame(
+            pointclouds=preprocessed_pointclouds
+        )
+        processed_pointclouds = self.remove_points_within_robot(
+            pointclouds=no_robot_pointclouds
+        )
+        
+        costmap, occupied_indices = self.convert_pointcloud_to_costmap(
+            pointclouds=processed_pointclouds
+        )
+        costmap = self.inflate_rigid_body(
+            costmap=costmap.copy(), 
+            occupied_indices=occupied_indices
+        )
+
+        return costmap
 
 class AutonomousNavigator:
     def __init__(self,
@@ -1741,7 +1942,7 @@ class AutonomousNavigator:
         LINEAR_VELOCITY_GAIN = 1.0
         ANGULAR_VELOCITY_GAIN = 2.0
         ANGLE_THRESHOLD = 0.05
-        
+
         current_robot_x, current_robot_y, current_robot_yaw = current_robot_pose
         target_x, target_y = lookahead_position
 
@@ -1794,6 +1995,14 @@ class AutonomousNavigator:
         ])
         x_robot, y_robot = rotation_matrix @ delta
 
+        # 전방 2m 검사
+        pixels_ahead = int(.0 / resolution)  # 1m / 0.02m (1픽셀 크기)
+        front_region = local_costmap[
+            center_row : center_row + pixels_ahead,
+            center_col - 1 : center_col + 2, 
+        ]
+        is_1m = np.any(front_region == self.local_costmap_generator.max_cost)
+
         # -------------------------------
         # Bresenham (row = x, col = y)
         # -------------------------------
@@ -1827,7 +2036,7 @@ class AutonomousNavigator:
                 err += dx_
                 row += sy
 
-        return is_obstacle
+        return is_obstacle & is_1m
 
 
 
@@ -2043,17 +2252,17 @@ class Agent:
         scan_ranges = observation['sensor_lidar_front']                 # LiDAR data
 
         # Localization
-        # current_robot_pose = self.autonomous_navigator.localizer(
-        #     delta_distance, 
-        #     delta_yaw, 
-        #     scan_ranges, 
-        #     self.occupancy_grid_map, 
-        #     self.distance_map, 
-        #     self.map_origin, 
-        #     self.resolution
-        # )
+        current_robot_pose = self.autonomous_navigator.localizer(
+            delta_distance, 
+            delta_yaw, 
+            scan_ranges, 
+            self.occupancy_grid_map, 
+            self.distance_map, 
+            self.map_origin, 
+            self.resolution
+        )
         # test
-        current_robot_pose = self.true_robot_pose
+        # current_robot_pose = self.true_robot_pose
 
         # Current time
         dt = 0.1
@@ -2357,264 +2566,3 @@ class ModelPredictivePathIntegralController:
         self.previous_control_sequence = optimal_control_sequence
 
         return optimal_control_sequence
-
-
-class LocalCostMapGenerator:
-    def __init__(self,
-            scan_point_num=241,
-            scan_min_range=0.05,                 # (m)
-            scan_max_range=8,                    # (m)
-            scan_min_angle=-1.9,                 # (rad)
-            scan_angle_increment=0.016,          # (rad)
-
-            baselink_to_front=0.25,              # (m)
-            baselink_to_rear=0.25,               # (m)
-            baselink_to_right=0.25,              # (m)
-            baselink_to_left=0.25,               # (m)
-            baselink_to_laser=[0.147, 0.0, 0.0], # [x (m), y (m), yaw (rad)]
-
-            map_x_length: int = 16,              # (m)
-            map_y_length: int = 16,              # (m)
-            map_center_x_offset: int = 0,        # (m)
-            map_center_y_offset: int = 0,        # (m)
-            map_resolution: float = 0.02,        # (m)
-            max_cost: int = 100
-        ) -> None:
-        # Constants
-        self.baselink_to_front = baselink_to_front
-        self.baselink_to_rear = baselink_to_rear
-        self.baselink_to_right = baselink_to_right
-        self.baselink_to_left = baselink_to_left
-        self.baselink_to_laser = baselink_to_laser
-        self.scan_point_num = scan_point_num
-        self.scan_min_range = scan_min_range
-        self.scan_max_range = scan_max_range
-        self.scan_min_angle = scan_min_angle
-        self.scan_angle_increment = scan_angle_increment
-        self.map_x_length = map_x_length
-        self.map_y_length = map_y_length
-        self.map_center_x_offset = map_center_x_offset
-        self.map_center_y_offset = map_center_y_offset
-        self.map_resolution = map_resolution
-        self.max_cost = max_cost
-
-    def convert_scan_to_pointclouds(self,
-            scan_ranges: np.ndarray
-        ) -> np.ndarray:
-        """
-        angle, measurement -> x, y
-
-        Parameter
-        ---------
-        - scan_distance
-
-        Using
-        -----
-        - self.scan_point_num
-        - self.scan_min_angle
-        - self.scan_angle_increment
-        """
-        scan_angles = self.scan_min_angle + np.arange(self.scan_point_num) * self.scan_angle_increment
-
-        pointcloud_xs = scan_ranges * np.cos(scan_angles)
-        pointcloud_ys = scan_ranges * np.sin(scan_angles)
-
-        pointclouds = np.vstack((pointcloud_xs, pointcloud_ys)).T
-        
-        return pointclouds
-
-    def preprocess_pointclouds(self,
-            pointclouds: np.ndarray
-        ) -> np.ndarray: 
-        """
-        Parameters
-        ----------
-        - pointcloud
-
-        Using
-        -----
-        - self.scan_min_range
-        - self.scan_max_range
-        """
-        # remove too near or too far points
-        distances = np.linalg.norm(pointclouds[:, :2], axis=1)
-
-        is_in_range = (distances >= self.scan_min_range) & (distances <= self.scan_max_range)
-        return pointclouds[is_in_range]
-
-    def transform_laser_to_robot_frame(self,
-            pointclouds: np.ndarray
-        ) -> np.ndarray: 
-        """
-        Parameter
-        ---------
-        - pointclouds
-
-        Return
-        ------
-        np.ndarray of shape (N, 2)
-            Points transformed to the robot frame.
-
-        Using
-        -----
-        - self.baselink_to_laser
-        """
-        # Laser pose relative to robot frame
-        laser_x, laser_y, laser_theta = self.baselink_to_laser
-
-        # Rotation matrix
-        cos_theta, sin_theta = np.cos(laser_theta), np.sin(laser_theta)
-        rotation_matrix = np.array([[cos_theta, -sin_theta],
-                                    [sin_theta,  cos_theta]])
-
-        # Apply rotation and translation
-        transformed_pointclouds = pointclouds @ rotation_matrix.T + np.array([laser_x, laser_y])
-
-        return transformed_pointclouds
-
-    def remove_points_within_robot(self,
-            pointclouds: np.ndarray
-        ) -> np.ndarray: 
-        """
-        robot frame coordinate
-        X axis: forward
-        Y axis: left
-
-        Parameter
-        ---------
-        - pointcloud
-
-        Using
-        -----
-        - self.baselink_to_rear
-        - self.baselink_to_front
-        - self.baselink_to_right
-        - self.baselink_to_left
-        """
-        min_x = - self.baselink_to_rear
-        max_x = self.baselink_to_front
-        min_y = - self.baselink_to_right
-        max_y = self.baselink_to_left
-
-        is_inside_box = (
-            (pointclouds[:, 0] >= min_x) & (pointclouds[:, 0] <= max_x) &
-            (pointclouds[:, 1] >= min_y) & (pointclouds[:, 1] <= max_y)
-        )
-
-        return pointclouds[~is_inside_box]
-
-    def convert_pointcloud_to_costmap(self,
-            pointclouds: np.ndarray    
-        ):
-        """
-        Parameter
-        ---------
-        - pointcloud
-
-        Returns
-        -------
-        - costmap
-        - occupied_indices
-
-        Using
-        -----
-        - self.map_x_length
-        - self.map_y_length
-        - self.map_center_x_offset 
-        - self.map_center_y_offset
-        - self.map_resolution 
-        - self.max_cost 
-        """
-        # Map dimensions in pixels
-        height = int(self.map_x_length / self.map_resolution)
-        width  = int(self.map_y_length / self.map_resolution)
-
-        # Initialize costmap as 0
-        costmap = np.zeros((height, width), dtype=np.float32)
-
-        # Convert pointcloud coordinates to map indices
-        col_indices = ((pointclouds[:, 1] + self.map_y_length / 2) / self.map_resolution).astype(int) # y
-        row_indices = ((pointclouds[:, 0] + self.map_x_length / 2) / self.map_resolution).astype(int) # x
-
-        # Keep only points inside the map
-        valid_mask = (row_indices >= 0) & (row_indices < height) & (col_indices >= 0) & (col_indices < width)
-        row_indices = row_indices[valid_mask]
-        col_indices = col_indices[valid_mask]
-
-        # Fill costmap
-        costmap[row_indices, col_indices] = self.max_cost
-
-        # Save occupied indices
-        occupied_indices = list(set(zip(row_indices, col_indices)))
-
-        return costmap, occupied_indices
-
-    def inflate_rigid_body(self,
-            costmap: np.ndarray,
-            occupied_indices: list    
-        ):
-        """
-        Parameters
-        ----------
-        - costmap
-        - occupied_indices
-
-        Return
-        - costmap
-
-        Using
-        -----
-        - self.map_resolution
-        - self.max_cost
-        - self.baselink_to_front
-        - self.baselink_to_rear
-        - self.baselink_to_right
-        - self.baselink_to_left
-        """
-        # Offsets (robot half-dimensions in grid cells)
-        front_offset = int(np.ceil(self.baselink_to_front / self.map_resolution))
-        rear_offset  = int(np.ceil(self.baselink_to_rear  / self.map_resolution))
-        right_offset = int(np.ceil(self.baselink_to_right / self.map_resolution))
-        left_offset  = int(np.ceil(self.baselink_to_left  / self.map_resolution))
-
-        map_height, map_width = costmap.shape
-
-        for row, col in occupied_indices:
-            # Compute inflation bounds (clamped to map size)
-            row_start = max(row - right_offset, 0)
-            row_end   = min(row + left_offset + 1, map_height)
-
-            col_start = max(col - rear_offset, 0)
-            col_end   = min(col + front_offset + 1, map_width)
-
-            # Inflate costmap region
-            costmap[row_start:row_end, col_start:col_end] = self.max_cost
-
-        return costmap
-
-    def generate_costmap(self,
-            scan_ranges: np.ndarray
-        ) -> np.ndarray:
-
-        pointclouds = self.convert_scan_to_pointclouds(
-            scan_ranges=scan_ranges
-        )
-        preprocessed_pointclouds = self.preprocess_pointclouds(
-            pointclouds=pointclouds
-        )
-        no_robot_pointclouds = self.transform_laser_to_robot_frame(
-            pointclouds=preprocessed_pointclouds
-        )
-        processed_pointclouds = self.remove_points_within_robot(
-            pointclouds=no_robot_pointclouds
-        )
-        
-        costmap, occupied_indices = self.convert_pointcloud_to_costmap(
-            pointclouds=processed_pointclouds
-        )
-        costmap = self.inflate_rigid_body(
-            costmap=costmap.copy(), 
-            occupied_indices=occupied_indices
-        )
-
-        return costmap
