@@ -2030,8 +2030,8 @@ class AutonomousNavigator:
                 min(MAX_ANGULAR_VELOCITY, ANGULAR_VELOCITY_GAIN * d_yaw)
             )
         
-            # linear_velocity = min(linear_velocity, 0.3)
-            linear_velocity = 0.7
+            linear_velocity = min(linear_velocity, 0.3)
+            # linear_velocity = 0.7
 
         return linear_velocity, angular_velocity
 
@@ -2060,7 +2060,7 @@ class AutonomousNavigator:
         x_robot, y_robot = rotation_matrix @ delta
 
         # 전방 2m 검사
-        pixels_ahead = int(.0 / resolution)  # 1m / 0.02m (1픽셀 크기)
+        pixels_ahead = int(2.0 / resolution)  # 1m / 0.02m (1픽셀 크기)
         front_region = local_costmap[
             center_row : center_row + pixels_ahead,
             center_col - 1 : center_col + 2, 
