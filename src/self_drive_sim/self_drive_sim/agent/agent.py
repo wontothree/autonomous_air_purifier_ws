@@ -1582,6 +1582,7 @@ class AutonomousNavigator:
         # Class object
         self.mcl = MonteCarloLocalizer()
         self.local_costmap_generator = LocalCostMapGenerator()
+        self.go_to_goal_controller = GoToGoalController()
 
         # Monte carlo localization
         self.mcl.initialize_particles(initial_robot_pose)
@@ -2175,7 +2176,7 @@ class AutonomousNavigator:
             self.i += 1
             self.initial_flag = False
         else:
-            if self.is_target_reached(current_robot_position, self.waypoints[-1]):
+            if self.is_target_reached(current_robot_position, self.waypoints[-1], self.position_threshold):
                 self.current_waypoint_index = 0
                 self.current_node_index = self.optimal_next_node_index
                 self.optimal_next_node_index = node_visit_queue[self.i]
@@ -2187,7 +2188,7 @@ class AutonomousNavigator:
                 self.tmp_target_position = self.waypoints[self.current_waypoint_index]
                 self.i += 1
             
-            if self.is_target_reached(current_robot_position, self.tmp_target_position) and self.current_waypoint_index < len(self.waypoints) - 1:
+            if self.is_target_reached(current_robot_position, self.tmp_target_position, self.position_threshold) and self.current_waypoint_index < len(self.waypoints) - 1:
                 self.current_waypoint_index += 1
                 self.tmp_target_position = self.waypoints[self.current_waypoint_index]
 
