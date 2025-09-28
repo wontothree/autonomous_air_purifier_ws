@@ -1,6 +1,6 @@
 <div align="center">
 
-  # Autonomous Agent Workspace
+  # Self-Driving Air Purifier
   
   Indoor Autonomous Navigation of Mobile Robot with 2D LiDAR and IMU
 
@@ -18,6 +18,9 @@ colcon build
 source /opt/ros/humble/setup.bash
 source install/setup.bash
 ```
+
+[http://localhost:8080/vnc.html](http://localhost:8080/vnc.html)
+
 ---
 
 ## 🏗️ Technical Architecture
