@@ -818,7 +818,7 @@ class Particle:
 
 class MonteCarloLocalizer:
     def __init__(self,
-            particle_num=100,
+            particle_num=10,
             initial_pose_noise_std=[0.02, 0.02, 0.02], # [x, y, yaw]
             odom_noise_std=[0.01, 0.002, 0.002, 0.01],
 
@@ -827,7 +827,7 @@ class MonteCarloLocalizer:
             scan_max_range=8.0,
             scan_min_angle=-1.9,
             scan_angle_increment=0.016,
-            scan_step=3,
+            scan_step=10,
             sigma_hit=0.2,
             unknown_class_prior=0.5,
             known_class_prior=0.5,
@@ -960,136 +960,115 @@ class MonteCarloLocalizer:
 			# update each particle	
             particle.pose.update(updated_x, updated_y, updated_yaw)
 
+
     def update_weights_by_measurement_model(
             self,
             scan_ranges: np.ndarray,
             occupancy_grid_map: np.ndarray,
             distance_map: np.ndarray,
             map_origin=(float, float),
-            map_resolution= float,
-        ) -> None:
-        """
-        Parameters
-        ----------
-        - scan_ranges
-        - occupancy_grid_map
-        - distance_map
-        - map_origin
-        - map_resolution
-
-        Update
-        ------
-        - self.particles
-
-        Using
-        -----
-        - self.particle_num
-        - self.scan_min_angle
-        - self.scan_angle_increment
-        - self.scan_min_range
-        - self.scan_max_range
-        - self.scan_step
-        - self.sigma_hit
-        - self.z_hit
-        - self.z_max
-        - self.z_rand
-        - self.baselink_to_laser
-        - self.known_class_prior
-        - self.unknown_class_prior
-        - self.unknown_class_lambda_
-        """
+            map_resolution=float,
+    ) -> None:
         # Fixed parameters for likelihood field model
-        gaussian_normalization_constant = 1.0 / math.sqrt(2.0 * math.pi * self.sigma_hit**2)
+        gaussian_normalization_constant = 1.0 / math.sqrt(2.0 * math.pi * self.sigma_hit ** 2)
         gaussian_exponent_factor = 1.0 / (2 * self.sigma_hit ** 2)
         probability_rand = 1.0 / self.scan_max_range
- 
+
         eps = 1e-12
 
+        # Pre-calculate sampled beam angles and ranges
         beam_num = len(scan_ranges)
         sampled_beam_indices = np.arange(0, beam_num, self.scan_step)
         sampled_beam_angles = self.scan_min_angle + sampled_beam_indices * self.scan_angle_increment
         sampled_scan_ranges = scan_ranges[sampled_beam_indices]
         
-        # Map constant
+        # Map constants
         map_height, map_width = occupancy_grid_map.shape
         map_origin_x, map_origin_y = map_origin
+
+        # Pre-calculate particle properties in a vectorized way
+        particle_yaws = np.array([p.pose.yaw for p in self.particles])
+        particle_xs = np.array([p.pose.x for p in self.particles])
+        particle_ys = np.array([p.pose.y for p in self.particles])
         
-        # Initialize particle weight
-        log_weights = np.zeros(self.particle_num, dtype=np.float64)
-        
-        # previous
-        particle_yaws = np.array([particle.pose.yaw for particle in self.particles])
-        particle_cos_yaws = np.cos(particle_yaws)
-        particle_sin_yaws = np.sin(particle_yaws)
-        
-        particle_xs = np.array([particle.pose.x for particle in self.particles])
-        particle_ys = np.array([particle.pose.y for particle in self.particles])
-        
-        # Previous calculation cos and sine for beam angle
+        # Pre-calculate trigonometric functions for particles and beams
+        cos_particle_yaws = np.cos(particle_yaws)
+        sin_particle_yaws = np.sin(particle_yaws)
         cos_sampled_beam_angles = np.cos(sampled_beam_angles)
         sin_sampled_beam_angles = np.sin(sampled_beam_angles)
         
-        for particle_index in range(self.particle_num):
-            particle_x = particle_xs[particle_index]
-            particle_y = particle_ys[particle_index]
-            particle_yaw = particle_yaws[particle_index]
-            cos_yaw = particle_cos_yaws[particle_index]
-            sin_yaw = particle_sin_yaws[particle_index]
+        # Calculate sensor pose for all particles at once
+        sensor_x = particle_xs + self.baselink_to_laser[0] * cos_particle_yaws - self.baselink_to_laser[1] * sin_particle_yaws
+        sensor_y = particle_ys + self.baselink_to_laser[0] * sin_particle_yaws + self.baselink_to_laser[1] * cos_particle_yaws
+        sensor_yaw = particle_yaws + self.baselink_to_laser[2]
 
-            sensor_x = particle_x + self.baselink_to_laser[0] * cos_yaw - self.baselink_to_laser[1] * sin_yaw
-            sensor_y = particle_y + self.baselink_to_laser[0] * sin_yaw + self.baselink_to_laser[1] * cos_yaw
-            sensor_yaw = particle_yaw + self.baselink_to_laser[2]
-         
-            log_likelihood = 0.0
-            sampled_beam_num = len(sampled_scan_ranges)
-            for beam_index in range(sampled_beam_num):
-                # Distance measured by lidar 
-                range_measurement = sampled_scan_ranges[beam_index]
-                
-                # Likelihood field model as known class probability
-                if not (self.scan_min_range < range_measurement < self.scan_max_range) or np.isinf(range_measurement) or np.isnan(range_measurement):
-                    class_conditional_probability = self.z_max + self.z_rand * probability_rand
-                else:
-                    direction_x = np.cos(sensor_yaw) * cos_sampled_beam_angles[beam_index] - np.sin(sensor_yaw) * sin_sampled_beam_angles[beam_index]
-                    direction_y = np.sin(sensor_yaw) * cos_sampled_beam_angles[beam_index] + np.cos(sensor_yaw) * sin_sampled_beam_angles[beam_index]
-                    lidar_hit_x = sensor_x + range_measurement * direction_x
-                    lidar_hit_y = sensor_y + range_measurement * direction_y
-                    map_index_x = int(round((lidar_hit_x - map_origin_x) / map_resolution))
-                    map_index_y = int(round((lidar_hit_y - map_origin_y) / map_resolution))
-                    
-                    if 0 <= map_index_x < map_height and 0 <= map_index_y < map_width:
-                        distance = distance_map[map_index_x, map_index_y] # [m]
-                        
-                        probability_hit = gaussian_normalization_constant * math.exp( -(distance ** 2) * gaussian_exponent_factor) * map_resolution
-
-                        known_class_probability = (self.z_hit * probability_hit + self.z_rand * probability_rand) * self.known_class_prior
-                    else:
-                        known_class_probability = (self.z_rand * probability_rand) * self.known_class_prior
-
-                    # Exponential distribution as unknown class probability
-                    unknown_class_probability = self.unknown_class_lambda_ * math.exp(-self.unknown_class_lambda_ * range_measurement) / (1 - math.exp(-self.unknown_class_lambda_ * self.scan_max_range)) * map_resolution * self.unknown_class_prior
-                    class_conditional_probability = known_class_probability + unknown_class_probability
-
-                log_likelihood += math.log(class_conditional_probability + eps)
+        # Expand sensor pose to match beam dimensions for vectorized calculation
+        sensor_x_expanded = np.repeat(sensor_x, len(sampled_scan_ranges)).reshape(self.particle_num, -1)
+        sensor_y_expanded = np.repeat(sensor_y, len(sampled_scan_ranges)).reshape(self.particle_num, -1)
+        sensor_yaw_expanded = np.repeat(sensor_yaw, len(sampled_scan_ranges)).reshape(self.particle_num, -1)
         
-            log_weights[particle_index] = log_likelihood
-            
+        # Expand beam properties
+        cos_beam_expanded = np.tile(cos_sampled_beam_angles, self.particle_num).reshape(self.particle_num, -1)
+        sin_beam_expanded = np.tile(sin_sampled_beam_angles, self.particle_num).reshape(self.particle_num, -1)
+        range_expanded = np.tile(sampled_scan_ranges, self.particle_num).reshape(self.particle_num, -1)
+
+        # Calculate Lidar hit points for all particles and beams
+        direction_x = np.cos(sensor_yaw_expanded) * cos_beam_expanded - np.sin(sensor_yaw_expanded) * sin_beam_expanded
+        direction_y = np.sin(sensor_yaw_expanded) * cos_beam_expanded + np.cos(sensor_yaw_expanded) * sin_beam_expanded
+
+        lidar_hit_x = sensor_x_expanded + range_expanded * direction_x
+        lidar_hit_y = sensor_y_expanded + range_expanded * direction_y
+        
+        # Convert hit points to map indices
+        map_index_x = np.round((lidar_hit_x - map_origin_x) / map_resolution).astype(int)
+        map_index_y = np.round((lidar_hit_y - map_origin_y) / map_resolution).astype(int)
+        
+        # Handle out-of-bounds indices
+        is_valid_map_index = (map_index_x >= 0) & (map_index_x < map_height) & \
+                            (map_index_y >= 0) & (map_index_y < map_width)
+
+        # Get distances from distance map using valid indices
+        distance_from_map = np.full(map_index_x.shape, np.inf)
+        distance_from_map[is_valid_map_index] = distance_map[map_index_x[is_valid_map_index], map_index_y[is_valid_map_index]]
+        
+        # Vectorized calculation of known and unknown class probabilities
+        probability_hit = gaussian_normalization_constant * np.exp(-(distance_from_map ** 2) * gaussian_exponent_factor) * map_resolution
+        
+        known_class_probability = (self.z_hit * probability_hit + self.z_rand * probability_rand) * self.known_class_prior
+        
+        # Exponential distribution for unknown class probability
+        exp_factor = -self.unknown_class_lambda_ * range_expanded
+        unknown_class_probability = self.unknown_class_lambda_ * np.exp(exp_factor) / (1 - np.exp(-self.unknown_class_lambda_ * self.scan_max_range)) * map_resolution * self.unknown_class_prior
+        
+        # Combine known and unknown class probabilities
+        class_conditional_probability = known_class_probability + unknown_class_probability
+
+        # Handle invalid measurements (too near, too far, inf, nan)
+        is_invalid_measurement = ~((self.scan_min_range < range_expanded) & (range_expanded < self.scan_max_range)) | \
+                                np.isinf(range_expanded) | np.isnan(range_expanded)
+        
+        class_conditional_probability[is_invalid_measurement] = self.z_max + self.z_rand * probability_rand
+        
+        # Sum log-likelihoods for each particle
+        log_likelihoods = np.sum(np.log(class_conditional_probability + eps), axis=1)
+
         # Normalize log-sum-exp
-        max_log_weight = np.max(log_weights)
-        exp_weights = np.exp(log_weights - max_log_weight)
+        max_log_weight = np.max(log_likelihoods)
+        exp_weights = np.exp(log_likelihoods - max_log_weight)
         normalized_weights = exp_weights / (np.sum(exp_weights) + eps)
         
-        # allocate weight to particle
+        # Allocate weights to particles
         for index, particle in enumerate(self.particles):
             particle.weight = max(normalized_weights[index], eps)
         
-        total_weight = sum(particle.weight for particle in self.particles)
+        # Re-normalize weights to ensure sum is 1 (numerical stability)
+        total_weight = sum(p.weight for p in self.particles)
         if total_weight > 0:
-            for particle in self.particles:
-                particle.weight /= total_weight
-
+            for p in self.particles:
+                p.weight /= total_weight
+        
         # Average likelihood for resampling
-        self.average_likelihood = np.mean([particle.weight for particle in self.particles])
+        self.average_likelihood = np.mean([p.weight for p in self.particles])
 
     def estimate_robot_pose(self):
         """
