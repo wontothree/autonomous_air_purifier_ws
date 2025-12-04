@@ -1,6 +1,6 @@
 <div align="center">
 
-  # Self-Driving Air Purifier
+  # Autonomous Air Purifier
   
   Indoor Autonomous Navigation of Mobile Robot with 2D LiDAR and IMU
 
@@ -42,3 +42,4 @@ mindmap
         └── 
 
 ---
+
