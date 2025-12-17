@@ -2,7 +2,7 @@
 
   # Autonomous Air Purifier
   
-  Indoor Autonomous Navigation of Mobile Robot with 2D LiDAR and IMU
+  Indoor Autonomous Navigation of Mobile Robot with 2D LiDAR and Odometry
 
   [![ROS2 Humble](https://img.shields.io/badge/ROS2-Humble-blue.svg)](https://docs.ros.org/en/humble/)
   [![Gazebo](https://img.shields.io/badge/Gazebo-11-orange.svg)](http://gazebosim.org/)
@@ -42,4 +42,5 @@ mindmap
         └── 
 
 ---
+
 
