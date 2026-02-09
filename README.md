@@ -19,8 +19,10 @@
 
 
 ```bash
-# ~/autonomous_agent_ws
-
+# ~/autonomous_agent_ws 
+colcon build
+source /opt/ros/humble/setup.bash
+source install/setup.bash
 ```
 
 4. Run
