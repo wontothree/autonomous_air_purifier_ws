@@ -13,11 +13,25 @@
 
 ## 🚀 Quick Start
 
+1. Install `Dev Containers` in Vscode Extentions
+2. Click `Reopen in Dev Container`
+3. Build
+
+
 ```bash
-colcon build
-source /opt/ros/humble/setup.bash
-source install/setup.bash
+# ~/autonomous_agent_ws
+
 ```
+
+4. Run
+
+```bash
+ros2 launch self_drive_sim train_launch_map3.py
+# or
+ros2 launch self_drive_sim test_launch_map3.py
+```
+
+5. Simulation
 
 [http://localhost:8080/vnc.html](http://localhost:8080/vnc.html)
 
