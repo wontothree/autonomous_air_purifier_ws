@@ -53,9 +53,15 @@ mindmap
 ### Project Structure
 
     autonomous_agent_ws
-    └── src/
-        ├── 
-        └── 
+    └── src/self_drive_sim/self_drive_sim/agent/
+        ├── agent.py
+        ├── autonomous_navigation.py
+        ├── go_to_goal_controller.py
+        ├── local_costmap_generator.py
+        ├── monte_carlo_localization.py
+        ├── mppi.py
+        ├── map.py
+        └── reference_waypoints.py
 
 ---
 
