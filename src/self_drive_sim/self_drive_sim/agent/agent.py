@@ -3,7 +3,8 @@ from self_drive_sim.agent.interfaces import Observation, Info, MapInfo
 import math
 
 from .map import Map, OCCUPANCY_GRID_MAP0, OCCUPANCY_GRID_MAP1, OCCUPANCY_GRID_MAP2, OCCUPANCY_GRID_MAP3
-from .autonomous_navigator import AutonomousNavigator, Pose
+from .autonomous_navigator import AutonomousNavigator
+from .monte_carlo_localizer import Pose
 
 class Agent:
     def __init__(self, logger):
@@ -121,7 +122,6 @@ class Agent:
         # Observation
         air_pollution_sensor_data = observation['air_sensor_pollution'] # pollution data
         robot_pollution_sensor_data =  observation['sensor_pollution']
-        # delta_distance = np.linalg.norm(observation["disp_position"])  
         delta_distance = math.dist([0, 0], observation["disp_position"]) # IMU data
         delta_yaw = observation['disp_angle']
         scan_ranges = observation['sensor_lidar_front']                 # LiDAR data
