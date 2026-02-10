@@ -127,17 +127,17 @@ class Agent:
         scan_ranges = observation['sensor_lidar_front']                 # LiDAR data
 
         # Localization
-        current_robot_pose = self.autonomous_navigator.localizer(
-            delta_distance, 
-            delta_yaw, 
-            scan_ranges, 
-            self.occupancy_grid_map, 
-            self.distance_map, 
-            self.map_origin, 
-            self.resolution
-        )
-        # test
-        # current_robot_pose = self.true_robot_pose
+        # current_robot_pose = self.autonomous_navigator.localizer(
+        #     delta_distance, 
+        #     delta_yaw, 
+        #     scan_ranges, 
+        #     self.occupancy_grid_map, 
+        #     self.distance_map, 
+        #     self.map_origin, 
+        #     self.resolution
+        # )
+        # GT Pose (only train)
+        current_robot_pose = self.true_robot_pose
 
         # Current time
         dt = 0.1
