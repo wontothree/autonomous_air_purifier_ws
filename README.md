@@ -14,7 +14,7 @@
 ## 🚀 Quick Start
 
 1. Install `Dev Containers` in Vscode Extentions
-2. Click `Reopen in Dev Container`
+2. Click `Dev Containers: Rebuild and Reopen Containers`
 3. Build
 
 
