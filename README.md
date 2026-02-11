@@ -48,8 +48,12 @@ ros2 launch self_drive_sim test_launch_map3.py
 ```mermaid
 mindmap
   root(autonomous_agent_ws)
-    (localizaer)
-    (controller)
+    (monte_carlo_localizer)
+    (mppi_controller)
+    (go_to_goal_controller)
+    (local_costmap_generator)
+    (traveling_salesman_problem_task_planner)
+    (finite_state_machine)
 ```
 
 ### Project Structure
@@ -67,22 +71,6 @@ mindmap
 
 ---
 
-## Code
-
-https://github.com/wontothree/autonomous_air_purifier_ws/blob/main/src/self_drive_sim/self_drive_sim/agent/agent.py
-
-|Class||Function|
-|---|---|---|
-|`DistanceMatrixCalculator`|||
-|`Map`||
-|`Pose`||
-|`Particle`||
-|`MonteCarloLocalizer`||
-|`LocalCostMapGenerator`||
-|`GoToGoalController`||
-|`AutonomousNavigator`||
-|`Agent`||
-|`ModelPredictivePathIntegralController`||
 
 
 
