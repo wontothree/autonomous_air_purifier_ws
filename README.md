@@ -9,7 +9,7 @@
 
 </div>
 
-![](https://github.com/user-attachments/assets/ed8e2082-30cc-4e02-846e-701e8b91944b)
+https://github.com/user-attachments/assets/6c822841-3c3a-4ef9-8664-ebfed5518c7a
 
 --- 
 
@@ -83,6 +83,7 @@ https://github.com/wontothree/autonomous_air_purifier_ws/blob/main/src/self_driv
 |`AutonomousNavigator`||
 |`Agent`||
 |`ModelPredictivePathIntegralController`||
+
 
 
 
